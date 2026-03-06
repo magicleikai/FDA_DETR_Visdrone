@@ -1,0 +1,19 @@
+# VisDrone 数据集路径配置 (基于清洗后的 YOLO 格式目录)
+path: D:/pythonProjects/FDA_DETR_Visdrone/dataset/VisDrone_YOLO
+train: images/train  # 训练集相对路径
+val: images/val      # 验证集相对路径
+test: images/test    # 测试集相对路径
+
+# 类别信息
+nc: 10
+names:
+  0: pedestrian
+  1: people
+  2: bicycle
+  3: car
+  4: van
+  5: truck
+  6: tricycle
+  7: awning-tricycle
+  8: bus
+  9: motor

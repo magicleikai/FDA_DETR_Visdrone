@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-
+from scipy.optimize import linear_sum_assignment
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,9 +16,9 @@ from ultralytics.utils.ops import xywh2xyxy, xyxy2xywh
 
 class HungarianMatcher(nn.Module):
     """
-    FDA-DETR 深度定制版匹配器：
-    融合 NWD (Normalized Wasserstein Distance) 与 Freq-Sinkhorn 最优传输软匹配。
-    彻底解决 VisDrone 极小目标 IoU 失效和密集场景匹配震荡问题。
+    FDA-DETR 定制版匹配器 (修复模式坍塌版)：
+    保留 NWD 距离计算代价矩阵，使用精确的线性分配(匈牙利算法)求解最优传输，
+    严格保证 Query 与极小目标的 1对1 匹配，防止密集场景下的 Query 资源分配失衡。
     """
 
     def __init__(
@@ -56,7 +56,6 @@ class HungarianMatcher(nn.Module):
         if sum(gt_groups) == 0:
             return [(torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.long)) for _ in range(bs)]
 
-        # 展平以便在批处理格式下计算全局 Cost Matrix
         pred_scores = pred_scores.detach().view(-1, nc)
         pred_scores = F.sigmoid(pred_scores) if self.use_fl else F.softmax(pred_scores, dim=-1)
         pred_bboxes = pred_bboxes.detach().view(-1, 4)
@@ -70,52 +69,32 @@ class HungarianMatcher(nn.Module):
         else:
             cost_class = -pred_scores
 
-        # 2. 计算 L1 回归代价
+        # 2. 计算 L1 代价
         cost_bbox = (pred_bboxes.unsqueeze(1) - gt_bboxes.unsqueeze(0)).abs().sum(-1)
 
-        # 3. 【核心创新】：将 GIoU 代价彻底替换为 NWD (归一化 Wasserstein 距离)
-        # NWD 越接近1表示越匹配，因此代价为 1.0 - NWD
+        # 3. 【核心保留】：依然使用 NWD 取代失效的 GIoU，让小目标即使不重叠也能被拉取
+        # 调用 fda_core.py 中的 gaussian_nwd，默认 pairwise=True 生成全局矩阵
         cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes)
 
-        # 4. 构建最终的代价矩阵 (Cost Matrix)
-        # 这里巧妙复用 'giou' 的增益系数来控制 NWD 的权重
+        # 4. 构建代价矩阵
         C = (
                 self.cost_gain["class"] * cost_class
                 + self.cost_gain["bbox"] * cost_bbox
-                + self.cost_gain["giou"] * cost_nwd
+                + self.cost_gain["giou"] * cost_nwd  # 复用 giou 权重放大 NWD 梯度
         )
 
         if self.with_mask:
             C += self._cost_mask(bs, gt_groups, masks, gt_mask)
 
-        # 处理无效值以防训练崩溃
         C[C.isnan() | C.isinf()] = 0.0
-
         C = C.view(bs, nq, -1).cpu()
-        indices = []
 
-        # 5. 【核心创新】：摒弃 Scipy 的线性硬指派，改用 Freq-Sinkhorn 最优传输求解
-        for i, c in enumerate(C.split(gt_groups, -1)):
-            c_i = c[i]  # 取出当前图片的代价矩阵 [num_queries, num_gt_for_this_image]
+        # 5. 【核心修复】：使用精确的最优传输(匈牙利算法)求解器，严格执行 1对1 约束
+        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(gt_groups, -1))]
 
-            if c_i.shape[1] == 0:
-                indices.append((torch.tensor([], dtype=torch.long), torch.tensor([], dtype=torch.long)))
-                continue
-
-            # 执行 Sinkhorn 软匹配算法
-            soft_plan = sinkhorn_knopp_match(c_i.to(pred_bboxes.device), high_freq_energy=None, epsilon=0.05,
-                                             iterations=3)
-
-            # 退火策略：提取概率最大的匹配对作为硬指派，确保每一个极小目标都被最高优的 Query 捕捉
-            _, src_ind = torch.max(soft_plan, dim=0)
-            tgt_ind = torch.arange(c_i.shape[1], device=src_ind.device)
-
-            indices.append((src_ind.cpu(), tgt_ind.cpu()))
-
-        # 还原 GT 索引的偏移量
         gt_groups_cumsum = torch.as_tensor([0, *gt_groups[:-1]]).cumsum_(0)
         return [
-            (i.to(torch.long), j.to(torch.long) + gt_groups_cumsum[k])
+            (torch.tensor(i, dtype=torch.long), torch.tensor(j, dtype=torch.long) + gt_groups_cumsum[k])
             for k, (i, j) in enumerate(indices)
         ]
 

@@ -17,24 +17,21 @@ def main():
     print("[INFO] 开始训练流程...")
     results = model.train(
         data="visdrone_fda.yaml",
-        epochs=100,  # 既然有了预训练权重，100轮足够起飞
+        epochs=300,  # 👈 把上限拉高到 300，给 Transformer 充分的拟合时间
+        patience=30,  # 👈 黄金参数：如果连续 30 个 Epoch mAP50 没有突破，就自动停止训练！绝不浪费算力
         imgsz=640,
-        batch=4,  # L 版本模型较大，显存如果不够可以改成 2
+        batch=4,
         device="0",
         workers=8,
         project="FDA_DETR_Runs",
         name="visdrone_rtdetr_L",
         deterministic=False,
-
-        # 针对极小目标的数据增强
         mosaic=1.0,
         mixup=0.1,
-
-        # 优化器
         optimizer="AdamW",
         lr0=0.0001,
         weight_decay=0.0001,
-        amp=True,  # 混合精度加速
+        amp=True,
         save_period=10
     )
 

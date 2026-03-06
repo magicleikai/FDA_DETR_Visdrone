@@ -12,7 +12,7 @@ from ultralytics.utils.loss import FocalLoss, VarifocalLoss
 from ultralytics.utils.metrics import bbox_iou
 
 from .ops import HungarianMatcher
-
+from ultralytics.nn.modules.fda_core import gaussian_nwd
 
 class DETRLoss(nn.Module):
     """DETR (DEtection TRansformer) Loss class for calculating various loss components.
@@ -119,26 +119,11 @@ class DETRLoss(nn.Module):
         return {name_class: loss_cls.squeeze() * self.loss_gain["class"]}
 
     def _get_loss_bbox(
-        self, pred_bboxes: torch.Tensor, gt_bboxes: torch.Tensor, postfix: str = ""
+            self, pred_bboxes: torch.Tensor, gt_bboxes: torch.Tensor, postfix: str = ""
     ) -> dict[str, torch.Tensor]:
-        """Compute bounding box and GIoU losses for predicted and ground truth bounding boxes.
 
-        Args:
-            pred_bboxes (torch.Tensor): Predicted bounding boxes with shape (N, 4).
-            gt_bboxes (torch.Tensor): Ground truth bounding boxes with shape (N, 4).
-            postfix (str, optional): String to append to the loss names for identification in multi-loss scenarios.
-
-        Returns:
-            (dict[str, torch.Tensor]): Dictionary containing:
-                - loss_bbox{postfix}: L1 loss between predicted and ground truth boxes, scaled by the bbox loss gain.
-                - loss_giou{postfix}: GIoU loss between predicted and ground truth boxes, scaled by the giou loss gain.
-
-        Notes:
-            If no ground truth boxes are provided (empty list), zero-valued tensors are returned for both losses.
-        """
-        # Boxes: [b, query, 4], gt_bbox: list[[n, 4]]
         name_bbox = f"loss_bbox{postfix}"
-        name_giou = f"loss_giou{postfix}"
+        name_giou = f"loss_giou{postfix}"  # 我们保留这个名字以防止底层 API 字典报错，但内核已换为 NWD
 
         loss = {}
         if len(gt_bboxes) == 0:
@@ -146,42 +131,18 @@ class DETRLoss(nn.Module):
             loss[name_giou] = torch.tensor(0.0, device=self.device)
             return loss
 
+        # 1. 基础 L1 距离损失保持不变
         loss[name_bbox] = self.loss_gain["bbox"] * F.l1_loss(pred_bboxes, gt_bboxes, reduction="sum") / len(gt_bboxes)
-        loss[name_giou] = 1.0 - bbox_iou(pred_bboxes, gt_bboxes, xywh=True, GIoU=True)
-        loss[name_giou] = loss[name_giou].sum() / len(gt_bboxes)
+
+        # 2. 【核心闭环】：剔除传统 GIoU，使用 NWD 提供平滑回归梯度
+        # 使用 pairwise=False 逐元素计算匹配对的距离，NWD 越接近 1 表示越重合，所以 loss 是 1 - NWD
+        loss_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes, pairwise=False)
+        loss[name_giou] = loss_nwd.sum() / len(gt_bboxes)
+
+        # 巧妙复用原本控制 GIoU 的权重参数来缩放 NWD 损失
         loss[name_giou] = self.loss_gain["giou"] * loss[name_giou]
+
         return {k: v.squeeze() for k, v in loss.items()}
-
-    # This function is for future RT-DETR Segment models
-    # def _get_loss_mask(self, masks, gt_mask, match_indices, postfix=''):
-    #     # masks: [b, query, h, w], gt_mask: list[[n, H, W]]
-    #     name_mask = f'loss_mask{postfix}'
-    #     name_dice = f'loss_dice{postfix}'
-    #
-    #     loss = {}
-    #     if sum(len(a) for a in gt_mask) == 0:
-    #         loss[name_mask] = torch.tensor(0., device=self.device)
-    #         loss[name_dice] = torch.tensor(0., device=self.device)
-    #         return loss
-    #
-    #     num_gts = len(gt_mask)
-    #     src_masks, target_masks = self._get_assigned_bboxes(masks, gt_mask, match_indices)
-    #     src_masks = F.interpolate(src_masks.unsqueeze(0), size=target_masks.shape[-2:], mode='bilinear')[0]
-    #     # TODO: torch does not have `sigmoid_focal_loss`, but it's not urgent since we don't use mask branch for now.
-    #     loss[name_mask] = self.loss_gain['mask'] * F.sigmoid_focal_loss(src_masks, target_masks,
-    #                                                                     torch.tensor([num_gts], dtype=torch.float32))
-    #     loss[name_dice] = self.loss_gain['dice'] * self._dice_loss(src_masks, target_masks, num_gts)
-    #     return loss
-
-    # This function is for future RT-DETR Segment models
-    # @staticmethod
-    # def _dice_loss(inputs, targets, num_gts):
-    #     inputs = F.sigmoid(inputs).flatten(1)
-    #     targets = targets.flatten(1)
-    #     numerator = 2 * (inputs * targets).sum(1)
-    #     denominator = inputs.sum(-1) + targets.sum(-1)
-    #     loss = 1 - (numerator + 1) / (denominator + 1)
-    #     return loss.sum() / num_gts
 
     def _get_loss_aux(
         self,

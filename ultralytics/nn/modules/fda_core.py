@@ -88,23 +88,32 @@ class WaveletFPN_Downsample(nn.Module):
 # 匹配层优化：NWD 与 Sinkhorn
 # ==========================================
 
-def gaussian_nwd(pred_boxes, gt_boxes, constant=12.8):
+def gaussian_nwd(pred_boxes, gt_boxes, constant=0.005, pairwise=True):
     """
-    归一化 Wasserstein 距离 (NWD)，将边界框建模为二维高斯分布 。
-    即使微小目标在空间上毫无像素重叠，也能提供连续平滑的梯度 。
-    boxes 格式假定为中心点与宽高：[cx, cy, w, h]
+    适应归一化坐标 [0,1] 的 NWD 计算。
+    constant 调整为 0.005 匹配归一化后极小的平方差。
+    pairwise: True 用于 Matcher (计算 NxM 矩阵)，False 用于 Loss (计算 Nx1 逐元素距离避免显存溢出)
     """
     if pred_boxes.shape[0] == 0 or gt_boxes.shape[0] == 0:
-        return torch.zeros((pred_boxes.shape[0], gt_boxes.shape[0]), device=pred_boxes.device)
+        if pairwise:
+            return torch.zeros((pred_boxes.shape[0], gt_boxes.shape[0]), device=pred_boxes.device)
+        else:
+            return torch.zeros(pred_boxes.shape[0], device=pred_boxes.device)
 
     cx1, cy1, w1, h1 = pred_boxes.unbind(-1)
     cx2, cy2, w2, h2 = gt_boxes.unbind(-1)
 
-    # 扩展维度计算两两之间的平方 Wasserstein 距离
-    wasserstein_sq = (cx1.unsqueeze(1) - cx2.unsqueeze(0)) ** 2 + \
-                     (cy1.unsqueeze(1) - cy2.unsqueeze(0)) ** 2 + \
-                     ((w1.unsqueeze(1) - w2.unsqueeze(0)) ** 2 +
-                      (h1.unsqueeze(1) - h2.unsqueeze(0)) ** 2) / 4.0
+    if pairwise:
+        # 用于 Matcher: 广播计算两两之间的 Wasserstein 距离 (N x M)
+        wasserstein_sq = (cx1.unsqueeze(1) - cx2.unsqueeze(0)) ** 2 + \
+                         (cy1.unsqueeze(1) - cy2.unsqueeze(0)) ** 2 + \
+                         ((w1.unsqueeze(1) - w2.unsqueeze(0)) ** 2 +
+                          (h1.unsqueeze(1) - h2.unsqueeze(0)) ** 2) / 4.0
+    else:
+        # 用于 Loss: 计算已匹配的一对一目标的 Wasserstein 距离 (N,)
+        wasserstein_sq = (cx1 - cx2) ** 2 + \
+                         (cy1 - cy2) ** 2 + \
+                         ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4.0
 
     nwd = torch.exp(-wasserstein_sq / constant)
     return nwd

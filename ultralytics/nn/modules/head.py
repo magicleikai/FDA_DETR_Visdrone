@@ -1654,29 +1654,29 @@ class RTDETRDecoder(nn.Module):
         else:
             guided_scores = enc_scores
 
-        # 步骤D: 提取 Top-K 索引 (这里取 num_queries，即 300)
-        topk_ind = torch.topk(guided_scores.max(-1)[0], self.num_queries, dim=1)[1]
-
-        # 根据索引提取原始框和特征
-        enc_topk_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
-        enc_topk_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
-
-        # 步骤E: 父子细胞分裂 (Parent-Child Splitting)
+        # 步骤D: 基于密度增强后的置信度，提取 Top-K 个初始查询 (只需取 num_queries 的一半)
         half_k = self.num_queries // 2
-        parent_bboxes = enc_topk_bboxes[:, :half_k, :]
-        parent_feats = enc_topk_feats[:, :half_k, :]
+        topk_ind = torch.topk(guided_scores.max(-1)[0], half_k, dim=1)[1]
 
-        child_feats = enc_topk_feats[:, half_k:, :]
+        # 提取这 Top-K/2 个高热度区域作为“分裂母体”
+        parent_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
+        parent_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
 
-        # 子 Query 继承父的位置，但加上网络自发学习的放射状微小偏移，解决密集遮挡
+        # 步骤E: 父子细胞分裂 (Parent-Child Splitting) 核心逻辑
+        # 1. 子 Query 完全继承父 Query 的语义特征 (修复错位Bug)
+        child_feats = parent_feats.clone()
+
+        # 2. 计算基于特征的微小空间漂移量
         offsets = self.child_offset(child_feats) * 0.05
-        child_bboxes = parent_bboxes.clone()
-        child_bboxes[:, :, :2] = child_bboxes[:, :, :2] + offsets
 
-        # 重组为 300 个 Query
+        # 3. 避免 PyTorch in-place 梯度报错的安全张量拼接法
+        cxcy = parent_bboxes[:, :, :2] + offsets
+        wh = parent_bboxes[:, :, 2:]
+        child_bboxes = torch.cat([cxcy, wh], dim=-1)
+
+        # 4. 重组为完整的 300 个 Query
         final_topk_bboxes = torch.cat([parent_bboxes, child_bboxes], dim=1)
         final_topk_feats = torch.cat([parent_feats, child_feats], dim=1)
-        # ===============================================================
 
         refer_bbox = final_topk_bboxes.sigmoid()
 

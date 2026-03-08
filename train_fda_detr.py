@@ -20,6 +20,7 @@ def main():
         epochs=300,  # 👈 把上限拉高到 300，给 Transformer 充分的拟合时间
         patience=30,  # 👈 黄金参数：如果连续 30 个 Epoch mAP50 没有突破，就自动停止训练！绝不浪费算力
         imgsz=640,
+        # imgsz=1024,
         batch=4,
         device="0",
         workers=8,

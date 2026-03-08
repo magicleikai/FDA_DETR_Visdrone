@@ -1,47 +1,46 @@
-# FDA-DETR-L: 基于 HGNetv2-L 架构
-# 完美适配官方 rtdetr-l.pt 权重，专攻 VisDrone 高频小目标
-
-nc: 10  # VisDrone 的 10 个类别
+# FDA-DETR-L 满血版: 完美对齐官方 HGNetv2-L 架构
+nc: 10
 scales:
   l: [1.00, 1.00, 1024]
 
-# HGNetv2-L Backbone (参数形状完美对齐 rtdetr-l.pt)
 backbone:
-  - [-1, 1, HGStem, [32, 48]]  # 0-P2/4
-  - [-1, 6, HGBlock, [48, 128, 3]]  # 1-stage1
-  - [-1, 1, DWConv, [128, 3, 2, 1, False]]  # 2-P3/8
-  - [-1, 6, HGBlock, [96, 512, 3]]  # 3-stage2
-  - [-1, 1, DWConv, [512, 3, 2, 1, False]]  # 4-P4/16
-  - [-1, 6, HGBlock, [192, 1024, 5, True, False]]  # 5-stage3
-  - [-1, 1, DWConv, [1024, 3, 2, 1, False]]  # 6-P5/32
-  - [-1, 6, HGBlock, [384, 2048, 5, True, True]]  # 7-stage4
+  - [-1, 1, HGStem, [32, 48]] # 0-P2/4
+  - [-1, 6, HGBlock, [48, 128, 3]] # 1-stage 1
 
-# FDA-DETR Head (注入小波解耦)
+  - [-1, 1, DWConv, [128, 3, 2, 1, False]] # 2-P3/8
+  - [-1, 6, HGBlock, [96, 512, 3]] # 3-stage 2
+
+  - [-1, 1, DWConv, [512, 3, 2, 1, False]] # 4-P4/16
+  - [-1, 6, HGBlock, [192, 1024, 5, True, False]] # 5-cm, c2, k, light, shortcut
+  - [-1, 6, HGBlock, [192, 1024, 5, True, True]]  # 6
+  - [-1, 6, HGBlock, [192, 1024, 5, True, True]]  # 7-stage 3 (P4)
+
+  - [-1, 1, DWConv, [1024, 3, 2, 1, False]] # 8-P5/32
+  - [-1, 6, HGBlock, [384, 2048, 5, True, False]] # 9-stage 4 (P5)
+
 head:
-  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 8 input_proj.2
-  - [-1, 1, AIFI, [1024, 8]]  # 9
-  - [-1, 1, Conv, [256, 1, 1]]  # 10 Y5
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 10 input_proj.2
+  - [-1, 1, AIFI, [1024, 8]]                      # 11
+  - [-1, 1, Conv, [256, 1, 1]]                    # 12, Y5
 
-  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]  # 11
-  - [5, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 12 input_proj.1
-  - [[-2, -1], 1, Concat, [1]]  # 13
-  - [-1, 3, RepC3, [256, 0.5]]  # 14
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]    # 13
+  - [7, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 14 input_proj.1
+  - [[-2, -1], 1, Concat, [1]]                    # 15
+  - [-1, 3, RepC3, [256]]                         # 16
+  - [-1, 1, Conv, [256, 1, 1]]                    # 17, Y4
 
-  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]  # 15
-  - [3, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 16 input_proj.0
-  - [[-2, -1], 1, Concat, [1]]  # 17
-  - [-1, 3, RepC3, [256, 0.5]]  # 18 输出最高分辨率特征
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]    # 18
+  - [3, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 19 input_proj.0
+  - [[-2, -1], 1, Concat, [1]]                    # 20
+  - [-1, 3, RepC3, [256]]                         # 21 (X3)
 
-  # ====================================================================
-  # 【核心魔改节点】：用你的 WaveletFPN 替换原版的 [-1, 1, Conv, [256, 3, 2]]
-  # ====================================================================
-  - [-1, 1, WaveletFPN_Downsample, [256]]  # 19 零参数量小波下采样
-  - [[-1, 14], 1, Concat, [1]]  # 20
-  - [-1, 3, RepC3, [256, 0.5]]  # 21
+  # --- 魔改点: 零参数小波下采样 ---
+  - [-1, 1, WaveletFPN_Downsample, [256]]         # 22
+  - [[-1, 17], 1, Concat, [1]]                    # 23
+  - [-1, 3, RepC3, [256]]                         # 24 (F4)
 
-  - [-1, 1, WaveletFPN_Downsample, [256]]  # 22 再次小波下采样
-  - [[-1, 10], 1, Concat, [1]]  # 23
-  - [-1, 3, RepC3, [256, 0.5]]  # 24
+  - [-1, 1, WaveletFPN_Downsample, [256]]         # 25
+  - [[-1, 12], 1, Concat, [1]]                    # 26
+  - [-1, 3, RepC3, [256]]                         # 27 (F5)
 
-  # 后端接驳我们改好最优传输 NWD+Sinkhorn 匹配器的 Decoder
-  - [[18, 21, 24], 1, RTDETRDecoder, [nc, 256, 300, 4, 8, 3]]  # 25
+  - [[21, 24, 27], 1, RTDETRDecoder, [nc]]        # 28

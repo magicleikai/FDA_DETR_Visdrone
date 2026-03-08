@@ -1528,18 +1528,18 @@ class RTDETRDecoder(nn.Module):
 
         self._reset_parameters()
 
+        # ======= FDA-DETR: DNHQ 密度引导与子Query偏移网络 =======
+        self.density_head = nn.Sequential(
+            nn.Conv2d(self.hidden_dim, 64, 3, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 1, 1),
+            nn.Sigmoid()
+        )
+        self.child_offset = nn.Linear(self.hidden_dim, 2)
+        # =======================================================
+
     def forward(self, x: list[torch.Tensor], batch: dict | None = None) -> tuple | torch.Tensor:
-        """Run the forward pass of the module, returning bounding box and classification scores for the input.
-
-        Args:
-            x (list[torch.Tensor]): List of feature maps from the backbone.
-            batch (dict, optional): Batch information for training.
-
-        Returns:
-            outputs (tuple | torch.Tensor): During training, returns a tuple of bounding boxes, scores, and other
-                metadata. During inference, returns a tensor of shape (bs, 300, 4+nc) containing bounding boxes and
-                class scores.
-        """
         from ultralytics.models.utils.ops import get_cdn_group
 
         # Input projection and embedding
@@ -1547,35 +1547,24 @@ class RTDETRDecoder(nn.Module):
 
         # Prepare denoising training
         dn_embed, dn_bbox, attn_mask, dn_meta = get_cdn_group(
-            batch,
-            self.nc,
-            self.num_queries,
-            self.denoising_class_embed.weight,
-            self.num_denoising,
-            self.label_noise_ratio,
-            self.box_noise_scale,
-            self.training,
+            batch, self.nc, self.num_queries, self.denoising_class_embed.weight,
+            self.num_denoising, self.label_noise_ratio, self.box_noise_scale, self.training
         )
 
-        embed, refer_bbox, enc_bboxes, enc_scores = self._get_decoder_input(feats, shapes, dn_embed, dn_bbox)
+        # 【核心修改】：把原汁原味的多尺度2D特征图 x 传给底层去生成密度图
+        embed, refer_bbox, enc_bboxes, enc_scores = self._get_decoder_input(feats, shapes, dn_embed, dn_bbox, x_2d=x)
 
         # Decoder
         dec_bboxes, dec_scores = self.decoder(
-            embed,
-            refer_bbox,
-            feats,
-            shapes,
-            self.dec_bbox_head,
-            self.dec_score_head,
-            self.query_pos_head,
-            attn_mask=attn_mask,
+            embed, refer_bbox, feats, shapes, self.dec_bbox_head,
+            self.dec_score_head, self.query_pos_head, attn_mask=attn_mask
         )
-        x = dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta
+        out_x = dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta
         if self.training:
-            return x
+            return out_x
         # (bs, 300, 4+nc)
         y = torch.cat((dec_bboxes.squeeze(0), dec_scores.squeeze(0).sigmoid()), -1)
-        return y if self.export else (y, x)
+        return y if self.export else (y, out_x)
 
     @staticmethod
     def _generate_anchors(
@@ -1642,64 +1631,64 @@ class RTDETRDecoder(nn.Module):
         feats = torch.cat(feats, 1)
         return feats, shapes
 
-    def _get_decoder_input(
-        self,
-        feats: torch.Tensor,
-        shapes: list[list[int]],
-        dn_embed: torch.Tensor | None = None,
-        dn_bbox: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Generate and prepare the input required for the decoder from the provided features and shapes.
-
-        Args:
-            feats (torch.Tensor): Processed features from encoder.
-            shapes (list): List of feature map shapes.
-            dn_embed (torch.Tensor, optional): Denoising embeddings.
-            dn_bbox (torch.Tensor, optional): Denoising bounding boxes.
-
-        Returns:
-            embeddings (torch.Tensor): Query embeddings for decoder.
-            refer_bbox (torch.Tensor): Reference bounding boxes.
-            enc_bboxes (torch.Tensor): Encoded bounding boxes.
-            enc_scores (torch.Tensor): Encoded scores.
-        """
+    def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None, x_2d=None):
         bs = feats.shape[0]
-        if self.dynamic or self.shapes != shapes:
-            self.anchors, self.valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
-            self.shapes = shapes
+        # 1. 基础特征解码
+        enc_bboxes = self.enc_bbox_head(feats)
+        enc_scores = self.enc_score_head(feats)
 
-        # Prepare input for decoder
-        features = self.enc_output(self.valid_mask * feats)  # bs, h*w, 256
-        enc_outputs_scores = self.enc_score_head(features)  # (bs, h*w, nc)
+        # ======= FDA-DETR 核心插入：DNHQ 密度引导与父子细胞分裂 =======
+        if x_2d is not None:
+            # 步骤A: 提取高分辨率特征图 x_2d[0] 生成单通道密度图
+            density_map = self.density_head(x_2d[0])  # [bs, 1, H, W]
 
-        # Query selection
-        # (bs*num_queries,)
-        topk_ind = torch.topk(enc_outputs_scores.max(-1).values, self.num_queries, dim=1).indices.view(-1)
-        # (bs*num_queries,)
-        batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)
+            # 步骤B: 将密度图插值对齐到所有尺度，并展平
+            density_scores = []
+            for feat in x_2d:
+                d_map = F.interpolate(density_map, size=feat.shape[2:], mode='bilinear', align_corners=False)
+                density_scores.append(d_map.flatten(2).transpose(1, 2))
+            density_scores = torch.cat(density_scores, dim=1)  # [bs, sum(H*W), 1]
 
-        # (bs, num_queries, 256)
-        top_k_features = features[batch_ind, topk_ind].view(bs, self.num_queries, -1)
-        # (bs, num_queries, 4)
-        top_k_anchors = self.anchors[:, topk_ind].view(bs, self.num_queries, -1)
+            # 步骤C: 密度引导置信度，迫使网络在密集区强行聚焦
+            guided_scores = enc_scores * (1.0 + density_scores)
+        else:
+            guided_scores = enc_scores
 
-        # Dynamic anchors + static content
-        refer_bbox = self.enc_bbox_head(top_k_features) + top_k_anchors
+        # 步骤D: 提取 Top-K 索引 (这里取 num_queries，即 300)
+        topk_ind = torch.topk(guided_scores.max(-1)[0], self.num_queries, dim=1)[1]
 
-        enc_bboxes = refer_bbox.sigmoid()
+        # 根据索引提取原始框和特征
+        enc_topk_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
+        enc_topk_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
+
+        # 步骤E: 父子细胞分裂 (Parent-Child Splitting)
+        half_k = self.num_queries // 2
+        parent_bboxes = enc_topk_bboxes[:, :half_k, :]
+        parent_feats = enc_topk_feats[:, :half_k, :]
+
+        child_feats = enc_topk_feats[:, half_k:, :]
+
+        # 子 Query 继承父的位置，但加上网络自发学习的放射状微小偏移，解决密集遮挡
+        offsets = self.child_offset(child_feats) * 0.05
+        child_bboxes = parent_bboxes.clone()
+        child_bboxes[:, :, :2] = child_bboxes[:, :, :2] + offsets
+
+        # 重组为 300 个 Query
+        final_topk_bboxes = torch.cat([parent_bboxes, child_bboxes], dim=1)
+        final_topk_feats = torch.cat([parent_feats, child_feats], dim=1)
+        # ===============================================================
+
+        refer_bbox = final_topk_bboxes.sigmoid()
+
         if dn_bbox is not None:
             refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
-        enc_scores = enc_outputs_scores[batch_ind, topk_ind].view(bs, self.num_queries, -1)
 
-        embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
-        if self.training:
-            refer_bbox = refer_bbox.detach()
-            if not self.learnt_init_query:
-                embeddings = embeddings.detach()
         if dn_embed is not None:
-            embeddings = torch.cat([dn_embed, embeddings], 1)
+            embed = torch.cat([dn_embed, final_topk_feats], 1)
+        else:
+            embed = final_topk_feats
 
-        return embeddings, refer_bbox, enc_bboxes, enc_scores
+        return embed, refer_bbox, enc_bboxes, enc_scores
 
     def _reset_parameters(self):
         """Initialize or reset the parameters of the model's various components with predefined weights and biases."""

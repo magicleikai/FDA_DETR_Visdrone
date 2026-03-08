@@ -1633,50 +1633,47 @@ class RTDETRDecoder(nn.Module):
 
     def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None, x_2d=None):
         bs = feats.shape[0]
-        # 1. 基础特征解码
+        # 1. 基础特征解码 (此时是全图 8400 个网格的特征)
         enc_bboxes = self.enc_bbox_head(feats)
         enc_scores = self.enc_score_head(feats)
 
         # ======= FDA-DETR 核心插入：DNHQ 密度引导与父子细胞分裂 =======
         if x_2d is not None:
-            # 步骤A: 提取高分辨率特征图 x_2d[0] 生成单通道密度图
             density_map = self.density_head(x_2d[0])  # [bs, 1, H, W]
-
-            # 步骤B: 将密度图插值对齐到所有尺度，并展平
             density_scores = []
             for feat in x_2d:
                 d_map = F.interpolate(density_map, size=feat.shape[2:], mode='bilinear', align_corners=False)
                 density_scores.append(d_map.flatten(2).transpose(1, 2))
             density_scores = torch.cat(density_scores, dim=1)  # [bs, sum(H*W), 1]
-
-            # 步骤C: 密度引导置信度，迫使网络在密集区强行聚焦
             guided_scores = enc_scores * (1.0 + density_scores)
         else:
             guided_scores = enc_scores
 
-        # 步骤D: 基于密度增强后的置信度，提取 Top-K 个初始查询 (只需取 num_queries 的一半)
+        # 步骤D: 提取 Top-K 个初始查询 (由于父子要1变2，我们这里只取 num_queries 的一半，即 150 个)
         half_k = self.num_queries // 2
         topk_ind = torch.topk(guided_scores.max(-1)[0], half_k, dim=1)[1]
 
-        # 提取这 Top-K/2 个高热度区域作为“分裂母体”
+        # 提取这 150 个高热度区域作为“分裂母体”
         parent_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
         parent_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
+        # 【新增】：同时提取父Query的分数，用于底层的辅助损失(Aux Loss)计算
+        parent_scores = enc_scores.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.nc))
 
         # 步骤E: 父子细胞分裂 (Parent-Child Splitting) 核心逻辑
-        # 1. 子 Query 完全继承父 Query 的语义特征 (修复错位Bug)
         child_feats = parent_feats.clone()
+        # 子Query同样继承父Query的初始分数
+        child_scores = parent_scores.clone()
 
-        # 2. 计算基于特征的微小空间漂移量
         offsets = self.child_offset(child_feats) * 0.05
-
-        # 3. 避免 PyTorch in-place 梯度报错的安全张量拼接法
         cxcy = parent_bboxes[:, :, :2] + offsets
         wh = parent_bboxes[:, :, 2:]
         child_bboxes = torch.cat([cxcy, wh], dim=-1)
 
-        # 4. 重组为完整的 300 个 Query
+        # 重组为完整的 300 个 Query (形状严格为 [bs, 300, xxx])
         final_topk_bboxes = torch.cat([parent_bboxes, child_bboxes], dim=1)
         final_topk_feats = torch.cat([parent_feats, child_feats], dim=1)
+        final_topk_scores = torch.cat([parent_scores, child_scores], dim=1)
+        # =================================================================
 
         refer_bbox = final_topk_bboxes.sigmoid()
 
@@ -1688,7 +1685,9 @@ class RTDETRDecoder(nn.Module):
         else:
             embed = final_topk_feats
 
-        return embed, refer_bbox, enc_bboxes, enc_scores
+        # 【核心修复】：返回 final_topk_bboxes 和 final_topk_scores (维度是300)
+        # 绝不能返回包含 8400 个框的 enc_bboxes！
+        return embed, refer_bbox, final_topk_bboxes, final_topk_scores
 
     def _reset_parameters(self):
         """Initialize or reset the parameters of the model's various components with predefined weights and biases."""

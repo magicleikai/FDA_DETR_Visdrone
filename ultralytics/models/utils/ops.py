@@ -26,12 +26,13 @@ class FreqSinkhornMatcher(nn.Module):
     完美对应 PDF 论文第 5 节的理论推演。
     """
 
-    def __init__(self, cost_gain=None, use_fl=True, with_mask=False, alpha=0.25, gamma=2.0):
+    def __init__(self, cost_gain=None, use_fl=True, use_vfl=False, with_mask=False, alpha=0.25, gamma=2.0):
         super().__init__()
         if cost_gain is None:
             cost_gain = {"class": 1, "bbox": 5, "giou": 2, "mask": 1, "dice": 1}
         self.cost_gain = cost_gain
         self.use_fl = use_fl
+        self.use_vfl = use_vfl  # 接收这个参数，防止报错
         self.with_mask = with_mask
         self.alpha = alpha
         self.gamma = gamma
@@ -90,14 +91,16 @@ class FreqSinkhornMatcher(nn.Module):
 
         indices = []
         for i, c in enumerate(C.split(gt_groups, -1)):
+            # 注意这里必须是 c[i]，提取当前 batch 中第 i 张图片的二维代价矩阵
+            c_i = c[i]
             if conf_variance < 0.005:
                 # 训练极早期：网络极度迷茫，执行模拟 Sinkhorn 熵正则化的软指派
                 # 通过引入随机平滑因子，打破硬匹配造成的剧烈震荡
-                c_smoothed = c / (1.0 + torch.rand_like(c) * 0.15)
+                c_smoothed = c_i / (1.0 + torch.rand_like(c_i) * 0.15)
                 indices.append(linear_sum_assignment(c_smoothed))
             else:
                 # 训练中后期：退火完成，回归严密的无偏最优传输一对一硬指派
-                indices.append(linear_sum_assignment(c))
+                indices.append(linear_sum_assignment(c_i))
         # ======================================================================
 
         gt_groups_cumsum = torch.as_tensor([0, *gt_groups[:-1]]).cumsum_(0)

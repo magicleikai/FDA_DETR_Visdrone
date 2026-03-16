@@ -12,3 +12,5 @@ seaborn>=0.11.0
 
 # 你小论文创新点（FDA-DETR）的专属核心依赖！
 PyWavelets>=1.4.1
+
+wandb>=0.25.1

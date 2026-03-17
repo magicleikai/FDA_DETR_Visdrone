@@ -1652,24 +1652,30 @@ class RTDETRDecoder(nn.Module):
         # 步骤D: 提取 Top-K 个初始查询 (由于父子要1变2，我们这里只取 num_queries 的一半，即 150 个)
         half_k = self.num_queries // 2
         topk_ind = torch.topk(guided_scores.max(-1)[0], half_k, dim=1)[1]
-
         # 提取这 150 个高热度区域作为“分裂母体”
         parent_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
         parent_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
-        # 【新增】：同时提取父Query的分数，用于底层的辅助损失(Aux Loss)计算
         parent_scores = enc_scores.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.nc))
-
-        # 步骤E: 父子细胞分裂 (Parent-Child Splitting) 核心逻辑
-        child_feats = parent_feats.clone()
-        # 子Query同样继承父Query的初始分数
+        # ======= 修复后的父子细胞分裂 (Parent-Child Splitting) 核心逻辑 =======
+        # 1. 动态特征变异 (Feature Mutation)：
+        # 我们不能让子细胞和父细胞完全一样。我们需要引入一个轻量级的“特征变异网络”
+        # 你可以在类的 __init__ 中添加: self.mutation_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
+        # 这里我们用现有的 self.child_offset 来生成不仅包含位置，还包含特征差异的信号
+        # 提取偏移量 (基于父特征预测相邻拥挤物体的方位)
+        offsets = self.child_offset(parent_feats) * 0.05
+        # 2. 计算子细胞的 Bounding Box：中心点偏移，宽高继承
+        child_cxcy = parent_bboxes[:, :, :2] + offsets
+        child_wh = parent_bboxes[:, :, 2:]
+        child_bboxes = torch.cat([child_cxcy, child_wh], dim=-1)
+        # 3. 极其关键的特征变异！
+        # 子细胞的特征不能照搬。我们将偏移量(位置变化)融合进特征中，迫使子细胞的 Attention 转移视线
+        # 我们用偏移量计算一个动态的位置感知向量 (借用前馈网络的一部分)
+        pos_mutation = self.query_pos_head(child_bboxes)  # [bs, 150, hidden_dim]
+        # 子特征 = 父特征 + 位置变异引导 (这是一个极具学术价值的残差结构！)
+        child_feats = parent_feats + pos_mutation
+        # 子分数继承父分数
         child_scores = parent_scores.clone()
-
-        offsets = self.child_offset(child_feats) * 0.05
-        cxcy = parent_bboxes[:, :, :2] + offsets
-        wh = parent_bboxes[:, :, 2:]
-        child_bboxes = torch.cat([cxcy, wh], dim=-1)
-
-        # 重组为完整的 300 个 Query (形状严格为 [bs, 300, xxx])
+        # 重组为完整的 300 个 Query
         final_topk_bboxes = torch.cat([parent_bboxes, child_bboxes], dim=1)
         final_topk_feats = torch.cat([parent_feats, child_feats], dim=1)
         final_topk_scores = torch.cat([parent_scores, child_scores], dim=1)

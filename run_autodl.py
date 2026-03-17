@@ -25,8 +25,9 @@ def main():
             data="visdrone_fda.yaml",
             epochs=100,
             imgsz=800,
-            batch=24,
-            workers=12,
+            batch=12,
+            workers=16,  # 👈 适当增加多线程加载
+            cache=True,  # 👈 终极杀招：把数据集全部载入内存
             device=0,
             project=project_dir,
             name=run_name
@@ -43,7 +44,6 @@ if __name__ == '__main__':
         traceback.print_exc()
         print("=========================================================\n")
     finally:
-        pass
         # 保底执行模块：无论上面是顺利跑完 100 轮，还是中间报错崩溃，都会走到这一步！
-        # print("[INFO] 💤 训练进程已结束，正在触发系统强制关机以停止计费...")
+        print("[INFO] 💤 训练进程已结束，正在触发系统强制关机以停止计费...")
         # os.system("shutdown")

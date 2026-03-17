@@ -1663,8 +1663,8 @@ class RTDETRDecoder(nn.Module):
         # 这里我们用现有的 self.child_offset 来生成不仅包含位置，还包含特征差异的信号
         # 提取偏移量 (基于父特征预测相邻拥挤物体的方位)
         offsets = self.child_offset(parent_feats) * 0.05
-        # 2. 计算子细胞的 Bounding Box：中心点偏移，宽高继承
-        child_cxcy = parent_bboxes[:, :, :2] + offsets
+        # 加入 clamp，确保分裂出的坐标绝不会跑出图像边界！
+        child_cxcy = torch.clamp(parent_bboxes[:, :, :2] + offsets, min=0.0, max=1.0)
         child_wh = parent_bboxes[:, :, 2:]
         child_bboxes = torch.cat([child_cxcy, child_wh], dim=-1)
         # 3. 极其关键的特征变异！

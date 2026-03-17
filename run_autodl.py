@@ -1,5 +1,6 @@
 import os
 import traceback
+import wandb  # 👈 新增：引入 wandb 库
 from ultralytics import RTDETR
 
 
@@ -8,6 +9,10 @@ def main():
     project_dir = "FDA_DETR_Runs"
     run_name = "visdrone_rtdetr_L"
     resume_weights = f"{project_dir}/{run_name}/weights/last.pt"
+
+    # 👈 新增：在代码启动时显式初始化 W&B
+    # resume="allow" 意味着如果系统检测到这是断点续训，它会自动把曲线拼接到上次的图表后面！
+    wandb.init(project=project_dir, name=run_name, resume="allow")
 
     # 智能分支：判断是接着跑，还是重新跑
     if os.path.exists(resume_weights):
@@ -26,8 +31,8 @@ def main():
             epochs=100,
             imgsz=800,
             batch=12,
-            workers=16,  # 👈 适当增加多线程加载
-            cache=True,  # 👈 终极杀招：把数据集全部载入内存
+            workers=20,
+            cache=True,
             device=0,
             project=project_dir,
             name=run_name
@@ -44,6 +49,11 @@ if __name__ == '__main__':
         traceback.print_exc()
         print("=========================================================\n")
     finally:
+        # 👈 新增：致命防坑！确保在系统关机前，把最后的 Loss 和指标上传到云端
+        if wandb.run is not None:
+            print("[INFO] 正在同步最后的数据到 Weights & Biases 云端...")
+            wandb.finish()
+
         # 保底执行模块：无论上面是顺利跑完 100 轮，还是中间报错崩溃，都会走到这一步！
         print("[INFO] 💤 训练进程已结束，正在触发系统强制关机以停止计费...")
-        # os.system("shutdown")
+        # os.system("shutdown")  # 跑通之后记得把这行的注释解开

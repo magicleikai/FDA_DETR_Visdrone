@@ -22,7 +22,7 @@ from ultralytics.nn.modules.fda_core import gaussian_nwd  # 确保导入NWD
 
 class FreqSinkhornMatcher(nn.Module):
     """
-    FDA-DETR 终极匹配器：高频能量加权的退火最优传输匹配 (Freq-Sinkhorn)
+    FDA-DETR 终极匹配器：高频能量加权的最优传输匹配 (Freq-Sinkhorn)
     完美对应 PDF 论文第 5 节的理论推演。
     """
 
@@ -32,7 +32,7 @@ class FreqSinkhornMatcher(nn.Module):
             cost_gain = {"class": 1, "bbox": 5, "giou": 2, "mask": 1, "dice": 1}
         self.cost_gain = cost_gain
         self.use_fl = use_fl
-        self.use_vfl = use_vfl  # 接收这个参数，防止报错
+        self.use_vfl = use_vfl
         self.with_mask = with_mask
         self.alpha = alpha
         self.gamma = gamma
@@ -63,19 +63,18 @@ class FreqSinkhornMatcher(nn.Module):
         cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes)
 
         # ======= FDA-DETR 核心创新：高频能量先验加权 (Freq-Energy Prior) =======
-        # 对应论文理论：面积越小的目标，高频信号能量越密集，匹配难度越高。
         # 计算归一化面积 (w * h)
         gt_area = gt_bboxes[:, 2] * gt_bboxes[:, 3]
 
         # 构建能量函数 E_hf: 面积越小，E_hf 越大（把小目标的权重最高放大 2 倍）
-        # 强制 Sinkhorn 算法向微小难样本倾斜
+        # 这就是 Sinkhorn 最优传输在目标检测中的实际物理意义：降低微小难样本的匹配门槛
         E_hf = 1.0 + 1.0 * torch.exp(-gt_area * 50.0)
 
-        # 能量倾斜：用 E_hf 压缩微小目标的匹配代价门槛
+        # 能量倾斜：用 E_hf 调制 NWD 代价
         cost_nwd_weighted = cost_nwd / E_hf.unsqueeze(0)
         # ======================================================================
 
-        # 4. 构建总代价矩阵
+        # 4. 构建总代价矩阵 C
         C = (
                 self.cost_gain["class"] * cost_class
                 + self.cost_gain["bbox"] * cost_bbox
@@ -85,23 +84,14 @@ class FreqSinkhornMatcher(nn.Module):
         C[C.isnan() | C.isinf()] = 0.0
         C = C.view(bs, nq, -1).cpu()
 
-        # ======= FDA-DETR 核心创新：退火 Sinkhorn 过渡策略 =======
-        # 根据网络输出置信度的方差(variance)动态判断训练阶段
-        conf_variance = pred_scores.var().item()
-
+        # ======= 进阶建议核心：纯净的全局最优硬匹配 =======
         indices = []
         for i, c in enumerate(C.split(gt_groups, -1)):
-            # 注意这里必须是 c[i]，提取当前 batch 中第 i 张图片的二维代价矩阵
             c_i = c[i]
-            if conf_variance < 0.005:
-                # 训练极早期：网络极度迷茫，执行模拟 Sinkhorn 熵正则化的软指派
-                # 通过引入随机平滑因子，打破硬匹配造成的剧烈震荡
-                c_smoothed = c_i / (1.0 + torch.rand_like(c_i) * 0.15)
-                indices.append(linear_sum_assignment(c_smoothed))
-            else:
-                # 训练中后期：退火完成，回归严密的无偏最优传输一对一硬指派
-                indices.append(linear_sum_assignment(c_i))
-        # ======================================================================
+            # 彻底删除方差判断和随机数扰动！
+            # 你的代价矩阵 C 已经包含了极强的高频能量引导，直接让匈牙利算法去求全局最优解即可！
+            indices.append(linear_sum_assignment(c_i))
+        # =================================================
 
         gt_groups_cumsum = torch.as_tensor([0, *gt_groups[:-1]]).cumsum_(0)
         return [

@@ -1,5 +1,5 @@
 # VisDrone 数据集路径配置 (基于清洗后的 YOLO 格式目录)
-path: D:/pythonProjects/FDA_DETR_Visdrone/dataset/VisDrone_YOLO
+path: ./dataset/VisDrone_YOLO
 train: images/train  # 训练集相对路径
 val: images/val      # 验证集相对路径
 test: images/test    # 测试集相对路径

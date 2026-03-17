@@ -1538,8 +1538,8 @@ class RTDETRDecoder(nn.Module):
         )
         self.child_offset = nn.Linear(self.hidden_dim, 2)
         # =======================================================
-        # 这是一个极具学术价值的门控标量，初始为 0，防止初始化时变异噪声摧毁预训练特征
-        # 随着训练，网络会自己学会该给子细胞注入多少变异比例！
+        # FDA-DETR 创新点：特征变异门控标量
+        # 初始为0，保证初期稳定；随后参与梯度更新，自适应调节变异幅度
         self.mutation_scale = nn.Parameter(torch.tensor([0.0]))
 
     def forward(self, x: list[torch.Tensor], batch: dict | None = None) -> tuple | torch.Tensor:
@@ -1648,26 +1648,36 @@ class RTDETRDecoder(nn.Module):
                 d_map = F.interpolate(density_map, size=feat.shape[2:], mode='bilinear', align_corners=False)
                 density_scores.append(d_map.flatten(2).transpose(1, 2))
             density_scores = torch.cat(density_scores, dim=1)  # [bs, sum(H*W), 1]
+            # 这里的 guided_scores 包含了密度的前向传播信息，用于筛选 top-k
             guided_scores = enc_scores * (1.0 + density_scores)
         else:
             guided_scores = enc_scores
 
-        # 步骤D: 提取 Top-K 个初始查询 (由于父子要1变2，我们这里只取 num_queries 的一半，即 150 个)
+        # 步骤D: 提取 Top-K 个初始查询 (这里的 topk_ind 是整数索引，无法传梯度！)
         half_k = self.num_queries // 2
         topk_ind = torch.topk(guided_scores.max(-1)[0], half_k, dim=1)[1]
 
-        # 提取这 150 个高热度区域作为“分裂母体”
-        # 注意：这里的 parent_bboxes 是没有经过 sigmoid 的 Logit 空间坐标！
+        # 提取母体的“基础”特征、分数和框（全是 Logit 空间）
         parent_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
-        parent_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
         parent_scores = enc_scores.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.nc))
+        base_parent_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
+
+        # ======= 🚨 核心接骨手术：重连密度网络的梯度流！ =======
+        if x_2d is not None:
+            # 提取这 150 个被选中位置的密度分数
+            selected_density = density_scores.gather(1, topk_ind.unsqueeze(-1))  # [bs, half_k, 1]
+            # 物理意义：选中了拥挤区域，就将拥挤程度特征化，直接送给 Decoder
+            # 【关键】：梯度可以顺着 selected_density 完美流回 density_head 了！
+            parent_feats = base_parent_feats * (1.0 + selected_density)
+        else:
+            parent_feats = base_parent_feats
 
         # ======= 修复后的父子细胞分裂 (Parent-Child Splitting) 核心逻辑 =======
 
         # 1. 严格的空间转换：把父细胞的 Logit 坐标转换为真实的 0~1 物理坐标
         parent_bboxes_sigmoid = parent_bboxes.sigmoid()
 
-        # 2. 在真实的物理空间进行偏移！并安全锁死在画面内 [0.001, 0.999]
+        # 2. 在真实的物理空间进行偏移！并安全锁死在画面内 [0.001, 0.999]，防止梯度爆炸
         offsets = self.child_offset(parent_feats) * 0.05
         child_cxcy_sigmoid = torch.clamp(parent_bboxes_sigmoid[:, :, :2] + offsets, min=0.001, max=0.999)
         child_wh_sigmoid = parent_bboxes_sigmoid[:, :, 2:]  # 宽高直接继承物理比例
@@ -1685,10 +1695,10 @@ class RTDETRDecoder(nn.Module):
 
         # 4. 动态且安全的特征变异 (Feature Mutation with Zero-Gating)
         # 用子细胞的 Logit 坐标生成位置变异感知向量
-        pos_mutation = self.query_pos_head(child_bboxes)  # [bs, 150, hidden_dim]
+        pos_mutation = self.query_pos_head(child_bboxes)  # [bs, half_k, hidden_dim]
 
         # 极其优美的残差：加入可学习的门控参数 self.mutation_scale
-        # 如果你暂时还没在 __init__ 里加 self.mutation_scale，这里用 getattr 做了个保底，防止代码崩溃
+        # 如果你没在 __init__ 里加，这里 getattr 会让它等于 0，子细胞就变成了纯克隆
         mutation_weight = getattr(self, 'mutation_scale', 0.0)
         child_feats = parent_feats + pos_mutation * mutation_weight
 
@@ -1711,7 +1721,7 @@ class RTDETRDecoder(nn.Module):
         else:
             embed = final_topk_feats
 
-        # 【核心修复】：返回 final_topk_bboxes 和 final_topk_scores (维度是300)
+        # 【核心修复】：返回的全部是拼接好的 300 维张量
         return embed, refer_bbox, final_topk_bboxes, final_topk_scores
 
     def _reset_parameters(self):

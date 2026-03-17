@@ -1538,6 +1538,9 @@ class RTDETRDecoder(nn.Module):
         )
         self.child_offset = nn.Linear(self.hidden_dim, 2)
         # =======================================================
+        # 这是一个极具学术价值的门控标量，初始为 0，防止初始化时变异噪声摧毁预训练特征
+        # 随着训练，网络会自己学会该给子细胞注入多少变异比例！
+        self.mutation_scale = nn.Parameter(torch.tensor([0.0]))
 
     def forward(self, x: list[torch.Tensor], batch: dict | None = None) -> tuple | torch.Tensor:
         from ultralytics.models.utils.ops import get_cdn_group
@@ -1652,30 +1655,47 @@ class RTDETRDecoder(nn.Module):
         # 步骤D: 提取 Top-K 个初始查询 (由于父子要1变2，我们这里只取 num_queries 的一半，即 150 个)
         half_k = self.num_queries // 2
         topk_ind = torch.topk(guided_scores.max(-1)[0], half_k, dim=1)[1]
+
         # 提取这 150 个高热度区域作为“分裂母体”
+        # 注意：这里的 parent_bboxes 是没有经过 sigmoid 的 Logit 空间坐标！
         parent_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
         parent_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
         parent_scores = enc_scores.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.nc))
+
         # ======= 修复后的父子细胞分裂 (Parent-Child Splitting) 核心逻辑 =======
-        # 1. 动态特征变异 (Feature Mutation)：
-        # 我们不能让子细胞和父细胞完全一样。我们需要引入一个轻量级的“特征变异网络”
-        # 你可以在类的 __init__ 中添加: self.mutation_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
-        # 这里我们用现有的 self.child_offset 来生成不仅包含位置，还包含特征差异的信号
-        # 提取偏移量 (基于父特征预测相邻拥挤物体的方位)
+
+        # 1. 严格的空间转换：把父细胞的 Logit 坐标转换为真实的 0~1 物理坐标
+        parent_bboxes_sigmoid = parent_bboxes.sigmoid()
+
+        # 2. 在真实的物理空间进行偏移！并安全锁死在画面内 [0.001, 0.999]
         offsets = self.child_offset(parent_feats) * 0.05
-        # 加入 clamp，确保分裂出的坐标绝不会跑出图像边界！
-        child_cxcy = torch.clamp(parent_bboxes[:, :, :2] + offsets, min=0.0, max=1.0)
-        child_wh = parent_bboxes[:, :, 2:]
+        child_cxcy_sigmoid = torch.clamp(parent_bboxes_sigmoid[:, :, :2] + offsets, min=0.001, max=0.999)
+        child_wh_sigmoid = parent_bboxes_sigmoid[:, :, 2:]  # 宽高直接继承物理比例
+
+        # 3. 必须转换回 Logit 空间 (Inverse Sigmoid)，才能和父细胞在同一维度拼接！
+        def inverse_sigmoid(x, eps=1e-5):
+            x = x.clamp(min=0, max=1)
+            x1 = x.clamp(min=eps)
+            x2 = (1 - x).clamp(min=eps)
+            return torch.log(x1 / x2)
+
+        child_cxcy = inverse_sigmoid(child_cxcy_sigmoid)
+        child_wh = inverse_sigmoid(child_wh_sigmoid)
         child_bboxes = torch.cat([child_cxcy, child_wh], dim=-1)
-        # 3. 极其关键的特征变异！
-        # 子细胞的特征不能照搬。我们将偏移量(位置变化)融合进特征中，迫使子细胞的 Attention 转移视线
-        # 我们用偏移量计算一个动态的位置感知向量 (借用前馈网络的一部分)
+
+        # 4. 动态且安全的特征变异 (Feature Mutation with Zero-Gating)
+        # 用子细胞的 Logit 坐标生成位置变异感知向量
         pos_mutation = self.query_pos_head(child_bboxes)  # [bs, 150, hidden_dim]
-        # 子特征 = 父特征 + 位置变异引导 (这是一个极具学术价值的残差结构！)
-        child_feats = parent_feats + pos_mutation
-        # 子分数继承父分数
+
+        # 极其优美的残差：加入可学习的门控参数 self.mutation_scale
+        # 如果你暂时还没在 __init__ 里加 self.mutation_scale，这里用 getattr 做了个保底，防止代码崩溃
+        mutation_weight = getattr(self, 'mutation_scale', 0.0)
+        child_feats = parent_feats + pos_mutation * mutation_weight
+
+        # 5. 子分数继承父分数
         child_scores = parent_scores.clone()
-        # 重组为完整的 300 个 Query
+
+        # 重组为完整的 300 个 Query (此时全部是统一的 Logit 空间和特征维度！)
         final_topk_bboxes = torch.cat([parent_bboxes, child_bboxes], dim=1)
         final_topk_feats = torch.cat([parent_feats, child_feats], dim=1)
         final_topk_scores = torch.cat([parent_scores, child_scores], dim=1)
@@ -1692,7 +1712,6 @@ class RTDETRDecoder(nn.Module):
             embed = final_topk_feats
 
         # 【核心修复】：返回 final_topk_bboxes 和 final_topk_scores (维度是300)
-        # 绝不能返回包含 8400 个框的 enc_bboxes！
         return embed, refer_bbox, final_topk_bboxes, final_topk_scores
 
     def _reset_parameters(self):

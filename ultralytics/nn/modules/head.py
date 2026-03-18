@@ -1689,13 +1689,16 @@ class RTDETRDecoder(nn.Module):
             x2 = (1 - x).clamp(min=eps)
             return torch.log(x1 / x2)
 
+        # 先把真实的物理坐标拼起来，留给位置编码器用！
+        child_bboxes_sigmoid = torch.cat([child_cxcy_sigmoid, child_wh_sigmoid], dim=-1)
+
         child_cxcy = inverse_sigmoid(child_cxcy_sigmoid)
         child_wh = inverse_sigmoid(child_wh_sigmoid)
-        child_bboxes = torch.cat([child_cxcy, child_wh], dim=-1)
+        child_bboxes = torch.cat([child_cxcy, child_wh], dim=-1)  # Logit空间框，留给后面拼接用
 
         # 4. 动态且安全的特征变异 (Feature Mutation with Zero-Gating)
-        # 用子细胞的 Logit 坐标生成位置变异感知向量
-        pos_mutation = self.query_pos_head(child_bboxes)  # [bs, half_k, hidden_dim]
+        # 【绝杀修复】：用 0~1 的物理坐标去生成位置编码，这才是 RT-DETR 的原生逻辑！
+        pos_mutation = self.query_pos_head(child_bboxes_sigmoid)  # 👈 完美输入！
 
         # 极其优美的残差：加入可学习的门控参数 self.mutation_scale
         # 如果你没在 __init__ 里加，这里 getattr 会让它等于 0，子细胞就变成了纯克隆

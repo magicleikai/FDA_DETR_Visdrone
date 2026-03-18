@@ -31,7 +31,8 @@ def main():
             data="visdrone_fda.yaml",
             epochs=100,
             imgsz=1024,
-            batch=6,
+            # batch=6,   17g
+            batch=8,
             workers=6,
             cache=True,
             device=0,

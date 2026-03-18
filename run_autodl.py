@@ -2,7 +2,8 @@ import os
 import traceback
 import wandb  # 👈 新增：引入 wandb 库
 from ultralytics import RTDETR
-
+import os
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 def main():
     # 指定训练输出的保存目录和权重路径
@@ -29,9 +30,9 @@ def main():
         model.train(
             data="visdrone_fda.yaml",
             epochs=100,
-            imgsz=800,
-            batch=12,
-            workers=20,
+            imgsz=1024,
+            batch=6,
+            workers=6,
             cache=True,
             device=0,
             project=project_dir,

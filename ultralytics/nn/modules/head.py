@@ -1708,7 +1708,9 @@ class RTDETRDecoder(nn.Module):
 
         # =================================================================
 
-        refer_bbox = final_topk_bboxes.sigmoid()
+        # 🚨 完美修复 1：保持在 Logit 空间！绝不能加 .sigmoid()
+        # Decoder 内部会自己做 sigmoid，而且这样才能与 dn_bbox 的空间严格对齐。
+        refer_bbox = final_topk_bboxes
 
         if dn_bbox is not None:
             refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
@@ -1718,10 +1720,9 @@ class RTDETRDecoder(nn.Module):
         else:
             embed = final_topk_feats
 
-        # ====== 🚨 核心修复 2：交出全图 8400 的控制权 =======
-        # embed 和 refer_bbox 是 300 维，它们去给 Decoder 干活
-        # enc_bboxes 和 enc_scores 是 8400 维，它们去给 Criterion 挨打受罚！
-        return embed, refer_bbox, enc_bboxes, enc_scores
+        # 🚨 完美修复 2：严格遵守 RT-DETR 官方接口的返回顺序！
+        # 顺序必须是：(送入解码器的特征, 送入解码器的Logit框, 编码器全图分数, 编码器全图Logit框)
+        return embed, refer_bbox, enc_scores, enc_bboxes
 
     def _reset_parameters(self):
         """Initialize or reset the parameters of the model's various components with predefined weights and biases."""

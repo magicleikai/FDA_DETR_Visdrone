@@ -1707,10 +1707,10 @@ class RTDETRDecoder(nn.Module):
         final_topk_feats = torch.cat([parent_feats, child_feats], dim=1)
 
         # =================================================================
-
-        # 🚨 完美修复 1：保持在 Logit 空间！绝不能加 .sigmoid()
-        # Decoder 内部会自己做 sigmoid，而且这样才能与 dn_bbox 的空间严格对齐。
-        refer_bbox = final_topk_bboxes
+        # 🚨 终极修复 1：必须进行 sigmoid！
+        # 让选出的 300 个 Logit 框转换到 0~1 物理空间，以对齐 dn_bbox
+        # 并满足底层 Deformable Attention 的 0~1 网格采样硬性需求！
+        refer_bbox = final_topk_bboxes.sigmoid()
 
         if dn_bbox is not None:
             refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
@@ -1720,9 +1720,9 @@ class RTDETRDecoder(nn.Module):
         else:
             embed = final_topk_feats
 
-        # 🚨 完美修复 2：严格遵守 RT-DETR 官方接口的返回顺序！
-        # 顺序必须是：(送入解码器的特征, 送入解码器的Logit框, 编码器全图分数, 编码器全图Logit框)
-        return embed, refer_bbox, enc_scores, enc_bboxes
+        # 🚨 终极修复 2：严格遵守官方接口顺序！
+        # 顺序必须是：(特征, 物理参考框, 全图Logit框, 全图Logit分数)
+        return embed, refer_bbox, enc_bboxes, enc_scores
 
     def _reset_parameters(self):
         """Initialize or reset the parameters of the model's various components with predefined weights and biases."""

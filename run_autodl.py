@@ -27,17 +27,33 @@ def main():
         model.load("rtdetr-l.pt")
 
         # 5090 的“榨干级”极限参数配置
+        # model.train(
+        #     data="visdrone_fda.yaml",
+        #     epochs=100,
+        #     imgsz=1024,
+        #     # batch=6,   17g
+        #     batch=8,
+        #     workers=6,
+        #     cache=True,
+        #     device=0,
+        #     project=project_dir,
+        #     name=run_name
+        # )
+
         model.train(
             data="visdrone_fda.yaml",
             epochs=100,
             imgsz=1024,
-            # batch=6,   17g
             batch=8,
             workers=6,
             cache=True,
             device=0,
             project=project_dir,
-            name=run_name
+            name=run_name,
+            # 👇 这三行必须在文件里，并且必须保存！
+            optimizer='AdamW',
+            lr0=0.0001,
+            weight_decay=0.0001
         )
 
 

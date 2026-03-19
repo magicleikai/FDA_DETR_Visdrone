@@ -42,9 +42,10 @@ def main():
 
         model.train(
             data="visdrone_fda.yaml",
-            epochs=100,
+            epochs=300,
             imgsz=1024,
             batch=8,
+            patience=20,
             workers=6,
             cache=True,
             device=0,

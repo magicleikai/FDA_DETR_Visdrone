@@ -61,37 +61,37 @@ class FreqSinkhornMatcher(nn.Module):
         # 2. 计算回归 L1 代价
         cost_bbox = (pred_bboxes.unsqueeze(1) - gt_bboxes.unsqueeze(0)).abs().sum(-1)
 
-        # 3. 使用 NWD 代替 GIoU 提供平滑梯度
+        # 3. 计算基础的 GIoU 代价 (保证大中型目标的物理边界严丝合缝)
+        # 需要确保你从 ultralytics.utils.metrics 导入了 bbox_iou，和 xywh2xyxy
+        cost_giou = -bbox_iou(xywh2xyxy(pred_bboxes), xywh2xyxy(gt_bboxes), GIoU=True)
+
+        # 4. 计算 NWD 代价 (提供全局平滑梯度，专治极小目标)
+        # gaussian_nwd 内部 constant 建议设为 0.3
         cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes)
 
-        # ======= FDA-DETR 核心创新：高频能量先验加权 (Freq-Energy Prior) =======
-        # 计算归一化面积 (w * h)
+        # ======= FDA-DETR 核心创新：高频能量先验加权 =======
         gt_area = gt_bboxes[:, 2] * gt_bboxes[:, 3]
-
-        # 构建能量函数 E_hf: 面积越小，E_hf 越大（把小目标的权重最高放大 2 倍）
-        # 这就是 Sinkhorn 最优传输在目标检测中的实际物理意义：降低微小难样本的匹配门槛
+        # 面积越小，E_hf 越大（最高 2.0，最低 1.0）
         E_hf = 1.0 + 1.0 * torch.exp(-gt_area * 50.0)
 
-        # 能量倾斜：用 E_hf 调制 NWD 代价
-        cost_nwd_weighted = cost_nwd / E_hf.unsqueeze(0)
+        # 【Bug修复：必须是乘法！】惩罚放大：小目标匹配错的代价翻倍，逼迫匈牙利算法优先照顾小目标！
+        cost_nwd_weighted = cost_nwd * E_hf.unsqueeze(0)
         # ======================================================================
 
-        # 4. 构建总代价矩阵 C
+        # 5. 构建总代价矩阵 C (融合了分类、L1、GIoU 以及高频加权的 NWD)
         C = (
                 self.cost_gain["class"] * cost_class
                 + self.cost_gain["bbox"] * cost_bbox
-                + self.cost_gain["giou"] * cost_nwd_weighted
+                + self.cost_gain["giou"] * (cost_giou + cost_nwd_weighted)  # 融合尺度特征
         )
 
         C[C.isnan() | C.isinf()] = 0.0
         C = C.view(bs, nq, -1).cpu()
 
-        # ======= 进阶建议核心：纯净的全局最优硬匹配 =======
+        # ======= 纯净的全局最优硬匹配 =======
         indices = []
         for i, c in enumerate(C.split(gt_groups, -1)):
             c_i = c[i]
-            # 彻底删除方差判断和随机数扰动！
-            # 你的代价矩阵 C 已经包含了极强的高频能量引导，直接让匈牙利算法去求全局最优解即可！
             indices.append(linear_sum_assignment(c_i))
         # =================================================
 

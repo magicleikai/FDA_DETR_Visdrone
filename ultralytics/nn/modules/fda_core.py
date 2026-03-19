@@ -88,7 +88,7 @@ class WaveletFPN_Downsample(nn.Module):
 # 匹配层优化：NWD 与 Sinkhorn
 # ==========================================
 
-def gaussian_nwd(pred_boxes, gt_boxes, constant=0.005, pairwise=True):
+def gaussian_nwd(pred_boxes, gt_boxes, constant=0.3, pairwise=True):
     """
     适应归一化坐标 [0,1] 的 NWD 计算。
     constant 调整为 0.005 匹配归一化后极小的平方差。
@@ -114,11 +114,7 @@ def gaussian_nwd(pred_boxes, gt_boxes, constant=0.005, pairwise=True):
         wasserstein_sq = (cx1 - cx2) ** 2 + \
                          (cy1 - cy2) ** 2 + \
                          ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4.0
-
-    # 【极其关键的修复】：因为输入进来的坐标是 0~1 归一化的，距离平方最大也只有 2 左右。
-    # 必须强制把常数压小到 0.05 以下，否则所有框的 NWD 算出来全是 1.0！
-    norm_constant = 0.05
-    nwd = torch.exp(-wasserstein_sq / norm_constant)
+    nwd = torch.exp(-wasserstein_sq / constant)
     return nwd
 
 def sinkhorn_knopp_match(cost_matrix, high_freq_energy=None, epsilon=0.05, iterations=3):

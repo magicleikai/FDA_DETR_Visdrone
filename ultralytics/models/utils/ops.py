@@ -29,7 +29,9 @@ class FreqSinkhornMatcher(nn.Module):
     def __init__(self, cost_gain=None, use_fl=True, use_vfl=False, with_mask=False, alpha=0.25, gamma=2.0):
         super().__init__()
         if cost_gain is None:
-            cost_gain = {"class": 1, "bbox": 5, "giou": 2, "mask": 1, "dice": 1}
+            # 【权重补偿】：因为 NWD 的值域 (0~1) 只有原来 GIoU (-1~1) 的一半，
+            # 这里必须把 giou(即NWD) 的惩罚权重翻倍到 4，强迫网络去学习目标的确切宽和高！
+            cost_gain = {"class": 2, "bbox": 5, "giou": 4, "mask": 1, "dice": 1}
         self.cost_gain = cost_gain
         self.use_fl = use_fl
         self.use_vfl = use_vfl

@@ -1,9 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="root@connect.westd.seetacloud.com:17575 password" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
+  <component name="PublishConfigData" autoUpload="Always" serverName="root@connect.westd.seetacloud.com:47324 password" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="root@connect.westd.seetacloud.com:17575 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/autodl-tmp/FDA_DETR_Visdrone" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@connect.westd.seetacloud.com:47324 password">
         <serverdata>
           <mappings>
             <mapping deploy="/root/autodl-tmp/FDA_DETR_Visdrone" local="$PROJECT_DIR$" />

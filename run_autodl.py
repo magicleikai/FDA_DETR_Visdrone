@@ -53,7 +53,9 @@ def main():
             # 👇 这三行必须在文件里，并且必须保存！
             optimizer='AdamW',
             lr0=0.0001,
-            weight_decay=0.0001
+            weight_decay=0.0001,
+            warmup_epochs=0.0,
+            warmup_bias_lr=0.0001
         )
 
 

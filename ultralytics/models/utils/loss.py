@@ -65,7 +65,8 @@ class DETRLoss(nn.Module):
         super().__init__()
 
         if loss_gain is None:
-            loss_gain = {"class": 1, "bbox": 5, "giou": 2, "no_object": 0.1, "mask": 1, "dice": 1}
+            # 🚀 必须在这里显式加上 "nwd": 2.0 ！！！
+            loss_gain = {"class": 1, "bbox": 5, "giou": 2, "nwd": 2.0, "mask": 1, "dice": 1}
         self.nc = nc
         self.matcher = FreqSinkhornMatcher(
             cost_gain={"class": 2, "bbox": 5, "giou": 2}, use_fl=use_fl, use_vfl=use_vfl
@@ -125,7 +126,7 @@ class DETRLoss(nn.Module):
     ) -> dict[str, torch.Tensor]:
 
         name_bbox = f"loss_bbox{postfix}"
-        name_giou = f"loss_giou{postfix}"  # 我们保留这个名字以防止底层 API 字典报错，但内核已换为 NWD
+        name_giou = f"loss_giou{postfix}"  # 狸猫换太子：底层仍叫 giou，内核已是 NWD
 
         loss = {}
         if len(gt_bboxes) == 0:
@@ -133,16 +134,15 @@ class DETRLoss(nn.Module):
             loss[name_giou] = torch.tensor(0.0, device=self.device)
             return loss
 
-        # 1. 基础 L1 距离损失保持不变
-        loss[name_bbox] = self.loss_gain["bbox"] * F.l1_loss(pred_bboxes, gt_bboxes, reduction="sum") / len(gt_bboxes)
+        # 1. 基础 L1 距离损失 (🚨 移除 self.loss_gain，交由外层加权)
+        loss[name_bbox] = F.l1_loss(pred_bboxes, gt_bboxes, reduction="sum") / len(gt_bboxes)
 
         # 2. 【核心闭环】：剔除传统 GIoU，使用 NWD 提供平滑回归梯度
-        # 使用 pairwise=False 逐元素计算匹配对的距离，NWD 越接近 1 表示越重合，所以 loss 是 1 - NWD
+        # 使用 pairwise=False 逐元素计算匹配对的距离
         loss_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes, pairwise=False)
-        loss[name_giou] = loss_nwd.sum() / len(gt_bboxes)
 
-        # 巧妙复用原本控制 GIoU 的权重参数来缩放 NWD 损失
-        loss[name_giou] = self.loss_gain["giou"] * loss[name_giou]
+        # (🚨 同样移除 self.loss_gain，保持纯净)
+        loss[name_giou] = loss_nwd.sum() / len(gt_bboxes)
 
         return {k: v.squeeze() for k, v in loss.items()}
 

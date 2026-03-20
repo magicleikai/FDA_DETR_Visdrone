@@ -71,9 +71,8 @@ class FreqSinkhornMatcher(nn.Module):
         if cost_giou.dim() == 3:
             cost_giou = cost_giou.squeeze(-1)
         # 4. 使用 NWD 代替 GIoU 提供平滑梯度
-        # (假设你的 gaussian_nwd 内部已经处理好了维度展开)
-        cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes)
-        # 🚀 致命防爆锁：同样确保 NWD 严格是 2D 矩阵
+        cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes, constant=0.3, pairwise=True)
+        # 💡 防爆锁依然留着，这是好习惯
         if cost_nwd.dim() == 3:
             cost_nwd = cost_nwd.squeeze(-1)
         # ======= FDA-DETR 核心创新：高频能量先验加权 =======

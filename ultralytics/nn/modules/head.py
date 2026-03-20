@@ -1563,19 +1563,17 @@ class RTDETRDecoder(nn.Module):
             self.dec_score_head, self.query_pos_head, attn_mask=attn_mask
         )
 
-        # 🚨🚨🚨 【核心修复】：在这里增加一道安检门！将 21504 截断为 300！ 🚨🚨🚨
+        # Decoder 之后
+        # 🚀 必须在区分 training/val 之前，无差别进行维度截断！
         if enc_bboxes.shape[1] > self.num_queries:
-            # 选出分数最高的前 num_queries (默认 300) 个目标
             topk_ind = torch.topk(enc_scores.max(-1)[0], self.num_queries, dim=1)[1]
             enc_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).repeat(1, 1, 4))
             enc_scores = enc_scores.gather(1, topk_ind.unsqueeze(-1).repeat(1, 1, enc_scores.shape[-1]))
-        # 🚨🚨🚨===================================================🚨🚨🚨
 
         out_x = dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta
         if self.training:
             return out_x
 
-        # (bs, 300, 4+nc)
         y = torch.cat((dec_bboxes.squeeze(0), dec_scores.squeeze(0).sigmoid()), -1)
         return y if self.export else (y, out_x)
 

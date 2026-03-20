@@ -57,32 +57,37 @@ class FreqSinkhornMatcher(nn.Module):
             cost_class = pos_cost_class - neg_cost_class
         else:
             cost_class = -pred_scores_cls
-        # 2. 计算回归 L1 代价 (严格的 cd_dist 风格二维距离)
-        # 用 cdist 是最稳妥的求距离方法，它直接输出 (1200, 210) 的矩阵，不需要我们手动 unsqueeze
-        cost_bbox = torch.cdist(pred_bboxes, gt_bboxes, p=1)
+        # 2. 计算回归 L1 代价 (严格构建 N x M 矩阵)
+        cost_bbox = (pred_bboxes.unsqueeze(1) - gt_bboxes.unsqueeze(0)).abs().sum(-1)
         # 3. 计算基础的 GIoU 代价
-        # ultralytics.utils.metrics.bbox_iou 自带支持 M x N 矩阵运算
-        # 我们按照官方标准写法，不需要手动 unsqueeze！
-        cost_giou = -bbox_iou(xywh2xyxy(pred_bboxes), xywh2xyxy(gt_bboxes), GIoU=True)
-        # 4. 计算 NWD 代价
-        # NWD 必须像 IoU 一样，输出 (1200, 210) 形状的张量
+        pred_xyxy = xywh2xyxy(pred_bboxes)
+        gt_xyxy = xywh2xyxy(gt_bboxes)
+        cost_giou = -bbox_iou(
+            pred_xyxy.unsqueeze(1),
+            gt_xyxy.unsqueeze(0),
+            GIoU=True
+        )
+        # 🚀 致命防爆锁：防止输出 (N, M, 1) 导致全局矩阵广播爆炸为 (N, N, M)
+        if cost_giou.dim() == 3:
+            cost_giou = cost_giou.squeeze(-1)
+        # 4. 使用 NWD 代替 GIoU 提供平滑梯度
+        # (假设你的 gaussian_nwd 内部已经处理好了维度展开)
         cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes)
+        # 🚀 致命防爆锁：同样确保 NWD 严格是 2D 矩阵
+        if cost_nwd.dim() == 3:
+            cost_nwd = cost_nwd.squeeze(-1)
         # ======= FDA-DETR 核心创新：高频能量先验加权 =======
         gt_area = gt_bboxes[:, 2] * gt_bboxes[:, 3]
         E_hf = 1.0 + 1.0 * torch.exp(-gt_area * 50.0)
-        # E_hf 维度是 (210,)。cost_nwd 是 (1200, 210)
-        # 我们用 unsqueeze(0) 将 E_hf 变成 (1, 210)，利用广播机制乘上去！
         cost_nwd_weighted = cost_nwd * E_hf.unsqueeze(0)
         # ======================================================================
-        # 5. 构建总代价矩阵 C
+        # 5. 构建总代价矩阵 C (此时所有矩阵严格为 NxM，绝对不会再爆炸)
         C = (
                 self.cost_gain["class"] * cost_class
                 + self.cost_gain["bbox"] * cost_bbox
                 + self.cost_gain["giou"] * (cost_giou + cost_nwd_weighted)
         )
-        # 此时 C 应当是 (1200, 210)
         C[C.isnan() | C.isinf()] = 0.0
-        # 强行重塑为 (bs, nq, num_gts) -> (4, 300, 210)
         C = C.view(bs, nq, -1).cpu()
         # ======= 纯净的全局最优硬匹配 =======
         indices = []

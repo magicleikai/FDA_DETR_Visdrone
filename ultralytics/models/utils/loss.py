@@ -141,6 +141,21 @@ class DETRLoss(nn.Module):
         # 使用 pairwise=False 逐元素计算匹配对的距离
         loss_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes, pairwise=False)
 
+        # 🚨🚨 【探针三：NWD 梯度存活诊断探针】 🚨🚨
+        if torch.rand(1).item() < 0.01 and len(loss_nwd) > 0:
+            print("\n" + "~" * 50)
+            print("🕳️ [探针三：NWD 梯度存活诊断]")
+            nwd_values = 1.0 - loss_nwd  # 算回原始的 NWD 相似度
+            print(f"    - NWD 相似度平均值: {nwd_values.mean().item():.6f}")
+            print(f"    - NWD 相似度最大值: {nwd_values.max().item():.6f}")
+            print(f"    - NWD 相似度最小值: {nwd_values.min().item():.6f}")
+            if nwd_values.mean().item() < 0.01:
+                print("    🚨 致命错误：NWD 相似度全军覆没 (接近0)！高斯常数(constant)设置太小了！模型变瞎！")
+            elif nwd_values.mean().item() > 0.99:
+                print("    🚨 致命错误：NWD 相似度全是1！高斯常数(constant)设置太大了！模型变瞎！")
+            print("~" * 50 + "\n")
+        # 🚨🚨 ================================ 🚨🚨
+
         # (🚨 同样移除 self.loss_gain，保持纯净)
         loss[name_giou] = loss_nwd.sum() / len(gt_bboxes)
 

@@ -71,13 +71,28 @@ class FreqSinkhornMatcher(nn.Module):
         if cost_giou.dim() == 3:
             cost_giou = cost_giou.squeeze(-1)
         # 4. 使用 NWD 代替 GIoU 提供平滑梯度
-        cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes, constant=0.3, pairwise=True)
+        cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes, pairwise=True)
         # 💡 防爆锁依然留着，这是好习惯
         if cost_nwd.dim() == 3:
             cost_nwd = cost_nwd.squeeze(-1)
         # ======= FDA-DETR 核心创新：高频能量先验加权 =======
         gt_area = gt_bboxes[:, 2] * gt_bboxes[:, 3]
         E_hf = 1.0 + 1.0 * torch.exp(-gt_area * 50.0)
+
+        # 🚨🚨 【探针二：E_hf 诊断探针】 🚨🚨
+        if torch.rand(1).item() < 0.01 and len(gt_area) > 0:
+            print("\n" + "*" * 50)
+            print("🔋 [探针二：高频能量 E_hf 诊断]")
+            print(f"    - GT 面积 (gt_area) 的平均值: {gt_area.mean().item():.6f}")
+            print(f"    - GT 面积 (gt_area) 的最小值: {gt_area.min().item():.6f} (可能是芝麻大目标)")
+            print(f"    - 算出的 E_hf 平均惩罚倍率: {E_hf.mean().item():.4f} (应该在 1.0 ~ 2.0 之间)")
+            if E_hf.mean().item() < 1.01:
+                print("    ⚠️ 警告：E_hf 平均值无限接近 1.0！所有小目标奖励失效！(可能是面积缩放尺度不对)")
+            elif E_hf.mean().item() > 1.99:
+                print("    ⚠️ 警告：E_hf 平均值无限接近 2.0！模型把所有目标都当成极小目标惩罚了！")
+            print("*" * 50 + "\n")
+        # 🚨🚨 ================================ 🚨🚨
+
         cost_nwd_weighted = cost_nwd * E_hf.unsqueeze(0)
         # ======================================================================
         # 5. 构建总代价矩阵 C (此时所有矩阵严格为 NxM，绝对不会再爆炸)
@@ -95,6 +110,32 @@ class FreqSinkhornMatcher(nn.Module):
             indices.append(linear_sum_assignment(c_i))
             # =================================================
         gt_groups_cumsum = torch.as_tensor([0, *gt_groups[:-1]]).cumsum_(0)
+
+        # ====================================================================
+        # 🚨🚨 【安全版诊断探针】 🚨🚨
+        # 探针一
+        # 工程建议：未来可以将其改为 DEBUG_MODE = True 来全局控制
+        if torch.rand(1).item() < 0.01:  # 1% 的概率抽样打印，不影响整体训练速度
+            try:
+                print("\n" + "=" * 50)
+                print("🚀 [探针一：Matcher 匹配质量监控]")
+                print(f"当前 Batch 各图目标数量: {gt_groups}")  # gt_groups 是 list，直接打印
+
+                if len(gt_groups) > 0 and gt_groups[0] > 0:
+                    # 【核心修复】：多加一个 [0] 剥离 Batch 维度！形状变为 (300, num_gts)
+                    c_0 = C.split(gt_groups, -1)[0][0]
+                    pred_idx, gt_idx = indices[0]
+                    matched_costs = c_0[pred_idx, gt_idx].cpu().numpy()
+                    print(f"👉 第一张图 (包含 {gt_groups[0]} 个 GT) 的硬匹配代价:")
+                    print(f"    - 平均 Cost: {matched_costs.mean():.4f} (越低越好)")
+                    print(f"    - 最小 Cost: {matched_costs.min():.4f}")
+                    print(f"    - 最大 Cost: {matched_costs.max():.4f}")
+                print("=" * 50 + "\n")
+            except Exception as e:
+                # 探针的最高原则：绝对不能因为探针报错而中断训练！
+                print(f"⚠️ 探针执行异常，已自动跳过: {e}")
+        # ====================================================================
+
         return [
             (torch.tensor(i, dtype=torch.long), torch.tensor(j, dtype=torch.long) + gt_groups_cumsum[k])
             for k, (i, j) in enumerate(indices)

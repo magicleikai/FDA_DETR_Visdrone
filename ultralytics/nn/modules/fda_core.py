@@ -88,31 +88,35 @@ class WaveletFPN_Downsample(nn.Module):
 # 匹配层优化：NWD 与 Sinkhorn
 # ==========================================
 
-def gaussian_nwd(pred_bboxes, gt_bboxes, constant=0.3, pairwise=True):
+def gaussian_nwd(pred_bboxes, gt_bboxes, pairwise=True):
     """
-    pred_bboxes: (N, 4) 预测框
-    gt_bboxes: (M, 4) 真实框
-    pairwise:
-        - True: 计算 N x M 的两两匹配矩阵 (用于 Matcher)
-        - False: 计算 N 个一对一目标的距离 (用于 Loss 计算)
+    针对 VisDrone 归一化目标的平滑自适应 NWD 计算。
     """
     cx1, cy1, w1, h1 = pred_bboxes.unbind(-1)
     cx2, cy2, w2, h2 = gt_bboxes.unbind(-1)
 
     if pairwise:
-        # 匹配器模式：交叉网格扩展，生成 (N, M) 矩阵
         wasserstein_sq = (cx1.unsqueeze(1) - cx2.unsqueeze(0)) ** 2 + \
                          (cy1.unsqueeze(1) - cy2.unsqueeze(0)) ** 2 + \
                          ((w1.unsqueeze(1) - w2.unsqueeze(0)) ** 2 + \
                           (h1.unsqueeze(1) - h2.unsqueeze(0)) ** 2) / 4.0
+
+        gt_area = (w2 * h2).unsqueeze(0)
     else:
-        # Loss 模式：直接点对点相减，生成 (N,) 的一维向量
-        # (此时外部已经保证了 N == M)
         wasserstein_sq = (cx1 - cx2) ** 2 + \
                          (cy1 - cy2) ** 2 + \
                          ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4.0
 
-    nwd = torch.exp(-wasserstein_sq / constant)
+        gt_area = w2 * h2
+
+    # 🚀 绝杀平滑：分段式自适应常数！
+    # 相比于直接乘以 5.0，使用平方根可以极大地平滑常数的波动范围
+    # 面积在 0.0001 (极小) 时，常数为 sqrt(0.0001) = 0.01 (不会过于严苛)
+    # 面积在 0.04 (较大) 时，常数为 sqrt(0.04) = 0.2 (相当于大常数)
+    # 最后再加上 0.02 的底座，保证绝对不会出现 0 分黑洞
+    dynamic_constant = torch.sqrt(torch.clamp(gt_area, min=1e-5)) + 0.02
+
+    nwd = torch.exp(-wasserstein_sq / dynamic_constant)
     return nwd
 
 def sinkhorn_knopp_match(cost_matrix, high_freq_energy=None, epsilon=0.05, iterations=3):

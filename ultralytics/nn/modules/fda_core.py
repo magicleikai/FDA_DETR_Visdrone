@@ -88,34 +88,25 @@ class WaveletFPN_Downsample(nn.Module):
 # 匹配层优化：NWD 与 Sinkhorn
 # ==========================================
 
-def gaussian_nwd(pred_boxes, gt_boxes, constant=0.3, pairwise=True):
+def gaussian_nwd(pred_bboxes, gt_bboxes, constant=0.3):
     """
-    适应归一化坐标 [0,1] 的 NWD 计算。
-    constant 调整为 0.005 匹配归一化后极小的平方差。
-    pairwise: True 用于 Matcher (计算 NxM 矩阵)，False 用于 Loss (计算 Nx1 逐元素距离避免显存溢出)
+    pred_bboxes: (N, 4) 预测框 [cx, cy, w, h]
+    gt_bboxes: (M, 4) 真实框 [cx, cy, w, h]
+    返回: (N, M) 的 NWD 相似度矩阵
     """
-    if pred_boxes.shape[0] == 0 or gt_boxes.shape[0] == 0:
-        if pairwise:
-            return torch.zeros((pred_boxes.shape[0], gt_boxes.shape[0]), device=pred_boxes.device)
-        else:
-            return torch.zeros(pred_boxes.shape[0], device=pred_boxes.device)
+    # 拆解出 cx, cy, w, h
+    cx1, cy1, w1, h1 = pred_bboxes.unbind(-1)  # 均为 (N,)
+    cx2, cy2, w2, h2 = gt_bboxes.unbind(-1)  # 均为 (M,)
 
-    cx1, cy1, w1, h1 = pred_boxes.unbind(-1)
-    cx2, cy2, w2, h2 = gt_boxes.unbind(-1)
+    # 构建 (N, M) 的矩阵运算！unsqueeze(1) 和 unsqueeze(0) 必须在这里面做！
+    # 这就是防止外部张量维数爆炸的究极核心！
+    wasserstein_sq = (cx1.unsqueeze(1) - cx2.unsqueeze(0)) ** 2 + \
+                     (cy1.unsqueeze(1) - cy2.unsqueeze(0)) ** 2 + \
+                     ((w1.unsqueeze(1) - w2.unsqueeze(0)) ** 2 + \
+                      (h1.unsqueeze(1) - h2.unsqueeze(0)) ** 2) / 4.0
 
-    if pairwise:
-        # 用于 Matcher: 广播计算两两之间的 Wasserstein 距离 (N x M)
-        wasserstein_sq = (cx1.unsqueeze(1) - cx2.unsqueeze(0)) ** 2 + \
-                         (cy1.unsqueeze(1) - cy2.unsqueeze(0)) ** 2 + \
-                         ((w1.unsqueeze(1) - w2.unsqueeze(0)) ** 2 +
-                          (h1.unsqueeze(1) - h2.unsqueeze(0)) ** 2) / 4.0
-    else:
-        # 用于 Loss: 计算已匹配的一对一目标的 Wasserstein 距离 (N,)
-        wasserstein_sq = (cx1 - cx2) ** 2 + \
-                         (cy1 - cy2) ** 2 + \
-                         ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4.0
     nwd = torch.exp(-wasserstein_sq / constant)
-    return nwd
+    return nwd  # 返回 (N, M) 的矩阵
 
 def sinkhorn_knopp_match(cost_matrix, high_freq_energy=None, epsilon=0.05, iterations=3):
     """

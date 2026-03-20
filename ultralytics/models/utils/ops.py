@@ -57,44 +57,39 @@ class FreqSinkhornMatcher(nn.Module):
             cost_class = pos_cost_class - neg_cost_class
         else:
             cost_class = -pred_scores_cls
-
-        # 2. 计算回归 L1 代价
-        cost_bbox = (pred_bboxes.unsqueeze(1) - gt_bboxes.unsqueeze(0)).abs().sum(-1)
-
-        # 3. 计算基础的 GIoU 代价 (保证大中型目标的物理边界严丝合缝)
-        # 需要确保你从 ultralytics.utils.metrics 导入了 bbox_iou，和 xywh2xyxy
+        # 2. 计算回归 L1 代价 (严格的 cd_dist 风格二维距离)
+        # 用 cdist 是最稳妥的求距离方法，它直接输出 (1200, 210) 的矩阵，不需要我们手动 unsqueeze
+        cost_bbox = torch.cdist(pred_bboxes, gt_bboxes, p=1)
+        # 3. 计算基础的 GIoU 代价
+        # ultralytics.utils.metrics.bbox_iou 自带支持 M x N 矩阵运算
+        # 我们按照官方标准写法，不需要手动 unsqueeze！
         cost_giou = -bbox_iou(xywh2xyxy(pred_bboxes), xywh2xyxy(gt_bboxes), GIoU=True)
-
-        # 4. 计算 NWD 代价 (提供全局平滑梯度，专治极小目标)
-        # gaussian_nwd 内部 constant 建议设为 0.3
+        # 4. 计算 NWD 代价
+        # NWD 必须像 IoU 一样，输出 (1200, 210) 形状的张量
         cost_nwd = 1.0 - gaussian_nwd(pred_bboxes, gt_bboxes)
-
         # ======= FDA-DETR 核心创新：高频能量先验加权 =======
         gt_area = gt_bboxes[:, 2] * gt_bboxes[:, 3]
-        # 面积越小，E_hf 越大（最高 2.0，最低 1.0）
         E_hf = 1.0 + 1.0 * torch.exp(-gt_area * 50.0)
-
-        # 【Bug修复：必须是乘法！】惩罚放大：小目标匹配错的代价翻倍，逼迫匈牙利算法优先照顾小目标！
+        # E_hf 维度是 (210,)。cost_nwd 是 (1200, 210)
+        # 我们用 unsqueeze(0) 将 E_hf 变成 (1, 210)，利用广播机制乘上去！
         cost_nwd_weighted = cost_nwd * E_hf.unsqueeze(0)
         # ======================================================================
-
-        # 5. 构建总代价矩阵 C (融合了分类、L1、GIoU 以及高频加权的 NWD)
+        # 5. 构建总代价矩阵 C
         C = (
                 self.cost_gain["class"] * cost_class
                 + self.cost_gain["bbox"] * cost_bbox
-                + self.cost_gain["giou"] * (cost_giou + cost_nwd_weighted)  # 融合尺度特征
+                + self.cost_gain["giou"] * (cost_giou + cost_nwd_weighted)
         )
-
+        # 此时 C 应当是 (1200, 210)
         C[C.isnan() | C.isinf()] = 0.0
+        # 强行重塑为 (bs, nq, num_gts) -> (4, 300, 210)
         C = C.view(bs, nq, -1).cpu()
-
         # ======= 纯净的全局最优硬匹配 =======
         indices = []
         for i, c in enumerate(C.split(gt_groups, -1)):
             c_i = c[i]
             indices.append(linear_sum_assignment(c_i))
-        # =================================================
-
+            # =================================================
         gt_groups_cumsum = torch.as_tensor([0, *gt_groups[:-1]]).cumsum_(0)
         return [
             (torch.tensor(i, dtype=torch.long), torch.tensor(j, dtype=torch.long) + gt_groups_cumsum[k])

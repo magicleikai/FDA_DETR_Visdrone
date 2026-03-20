@@ -1639,7 +1639,7 @@ class RTDETRDecoder(nn.Module):
 
         # ====== 🚨 核心修复 1：找回丢失的 Anchor Grid ======
         # 生成全图网格先验，这是 RT-DETR 建立空间认知的灵魂！
-        anchors, valid_mask = self.generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
+        anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
 
         # 如果你的版本带了特征投影层（保险起见加上）
         if hasattr(self, 'enc_out'):

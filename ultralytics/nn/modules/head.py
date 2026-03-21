@@ -1554,8 +1554,9 @@ class RTDETRDecoder(nn.Module):
             self.num_denoising, self.label_noise_ratio, self.box_noise_scale, self.training
         )
 
-        # 【核心修改】：把原汁原味的多尺度2D特征图 x 传给底层去生成密度图
-        embed, refer_bbox, enc_bboxes, enc_scores = self._get_decoder_input(feats, shapes, dn_embed, dn_bbox, x_2d=x)
+        # 🚨 终极修复 1：调用全新的 _get_decoder_input，直接获取完美的 300 个监督信号
+        embed, refer_bbox, enc_bboxes_sigmoid, enc_scores = self._get_decoder_input(feats, shapes, dn_embed, dn_bbox,
+                                                                                    x_2d=x)
 
         # Decoder
         dec_bboxes, dec_scores = self.decoder(
@@ -1563,14 +1564,10 @@ class RTDETRDecoder(nn.Module):
             self.dec_score_head, self.query_pos_head, attn_mask=attn_mask
         )
 
-        # Decoder 之后
-        # 🚀 必须在区分 training/val 之前，无差别进行维度截断！
-        if enc_bboxes.shape[1] > self.num_queries:
-            topk_ind = torch.topk(enc_scores.max(-1)[0], self.num_queries, dim=1)[1]
-            enc_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).repeat(1, 1, 4))
-            enc_scores = enc_scores.gather(1, topk_ind.unsqueeze(-1).repeat(1, 1, enc_scores.shape[-1]))
+        # 🚨 终极修复 2：彻底干掉那个坑爹的截断逻辑！
+        # 直接把完美的 300 个 Sigmoid 坐标框和 Logit 分数传给 Loss
+        out_x = dec_bboxes, dec_scores, enc_bboxes_sigmoid, enc_scores, dn_meta
 
-        out_x = dec_bboxes, dec_scores, enc_bboxes, enc_scores, dn_meta
         if self.training:
             return out_x
 
@@ -1645,16 +1642,14 @@ class RTDETRDecoder(nn.Module):
     def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None, x_2d=None):
         bs = feats.shape[0]
 
-        # ====== 🚨 核心修复 1：找回丢失的 Anchor Grid ======
-        # 生成全图网格先验，这是 RT-DETR 建立空间认知的灵魂！
+        # 生成全图网格先验
         anchors, valid_mask = self._generate_anchors(shapes, dtype=feats.dtype, device=feats.device)
 
-        # 如果你的版本带了特征投影层（保险起见加上）
         if hasattr(self, 'enc_out'):
             feats = self.enc_out(feats)
 
-        enc_bboxes = self.enc_bbox_head(feats) + anchors  # 👈 加上坐标锚点基准
-        enc_scores = self.enc_score_head(feats)
+        enc_bboxes = self.enc_bbox_head(feats) + anchors  # 此时是 Logit 空间，含 inf！
+        enc_scores = self.enc_score_head(feats)  # 此时是 Logit 空间
 
         # ======= FDA-DETR 核心插入：DNHQ 密度引导 =======
         if x_2d is not None:
@@ -1672,7 +1667,7 @@ class RTDETRDecoder(nn.Module):
         half_k = self.num_queries // 2
         topk_ind = torch.topk(guided_scores.max(-1)[0], half_k, dim=1)[1]
 
-        # 提取母体的“基础”特征、分数和框（全是在 Logit 空间操作）
+        # 提取母体的“基础”特征、分数和框（全是 Logit 空间）
         parent_bboxes = enc_bboxes.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, 4))
         parent_scores = enc_scores.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.nc))
         base_parent_feats = feats.gather(1, topk_ind.unsqueeze(-1).expand(-1, -1, self.hidden_dim))
@@ -1696,7 +1691,6 @@ class RTDETRDecoder(nn.Module):
             x2 = (1 - x).clamp(min=eps)
             return torch.log(x1 / x2)
 
-        # 留着物理坐标供 query_pos_head 使用
         child_bboxes_sigmoid = torch.cat([child_cxcy_sigmoid, child_wh_sigmoid], dim=-1)
 
         # 转回 Logit 空间进行拼接
@@ -1711,14 +1705,14 @@ class RTDETRDecoder(nn.Module):
         child_scores = parent_scores.clone()
 
         # 重组 300 个 Query 送给 Decoder
-        final_topk_bboxes = torch.cat([parent_bboxes, child_bboxes], dim=1)
+        final_topk_bboxes = torch.cat([parent_bboxes, child_bboxes], dim=1)  # Logit 空间
         final_topk_feats = torch.cat([parent_feats, child_feats], dim=1)
+        final_topk_scores = torch.cat([parent_scores, child_scores], dim=1)  # Logit 空间
 
-        # =================================================================
-        # 🚨 终极修复 1：必须进行 sigmoid！
-        # 让选出的 300 个 Logit 框转换到 0~1 物理空间，以对齐 dn_bbox
-        # 并满足底层 Deformable Attention 的 0~1 网格采样硬性需求！
-        refer_bbox = final_topk_bboxes.sigmoid()
+        # 🚨 终极修复 3：统一 Sigmoid 保护！
+        # 必须把最终选出的 300 个框变成 0~1 的物理坐标！这不仅是送给 Decoder 的，也是送给 Loss.py 的生命线！
+        final_bboxes_sigmoid = final_topk_bboxes.sigmoid()
+        refer_bbox = final_bboxes_sigmoid
 
         if dn_bbox is not None:
             refer_bbox = torch.cat([dn_bbox, refer_bbox], 1)
@@ -1728,9 +1722,8 @@ class RTDETRDecoder(nn.Module):
         else:
             embed = final_topk_feats
 
-        # 🚨 终极修复 2：严格遵守官方接口顺序！
-        # 顺序必须是：(特征, 物理参考框, 全图Logit框, 全图Logit分数)
-        return embed, refer_bbox, enc_bboxes, enc_scores
+        # 返回的顺序是 (特征, 参考坐标, 物理输出框, Logit分数)
+        return embed, refer_bbox, final_bboxes_sigmoid, final_topk_scores
 
     def _reset_parameters(self):
         """Initialize or reset the parameters of the model's various components with predefined weights and biases."""

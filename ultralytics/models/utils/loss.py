@@ -304,6 +304,18 @@ class DETRLoss(nn.Module):
         Returns:
             (dict[str, torch.Tensor]): Dictionary of losses.
         """
+
+        # 🚨🚨 【深水探针二：分类器智商】 🚨🚨
+        if torch.rand(1).item() < 0.01:
+            # 拿到预测分类的 sigmoid 激活概率
+            prob_scores = pred_scores.sigmoid()
+            max_scores = prob_scores.max(dim=-1)[0]
+            mean_max = max_scores.mean().item()
+            if mean_max < 0.001:
+                print(f"\n[⚠️ 智商异常] 分类器极度胆小！平均最高置信度仅为: {mean_max:.4f}。全图被当成背景！")
+            elif mean_max > 0.8:
+                print(f"\n[⚠️ 智商异常] 分类器极度自信瞎指！平均最高置信度: {mean_max:.4f}。分类陷入坍塌！")
+        # 🚨🚨 ====================== 🚨🚨
         if match_indices is None:
             match_indices = self.matcher(
                 pred_bboxes, pred_scores, gt_bboxes, gt_cls, gt_groups, masks=masks, gt_mask=gt_mask

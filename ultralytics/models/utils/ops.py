@@ -40,6 +40,16 @@ class FreqSinkhornMatcher(nn.Module):
         self.gamma = gamma
 
     def forward(self, pred_bboxes, pred_scores, gt_bboxes, gt_cls, gt_groups, masks=None, gt_mask=None):
+        # 🚨🚨 【深水探针三：预测框退化】 🚨🚨
+        if torch.rand(1).item() < 0.01:
+            pred_w = pred_bboxes[:, 2]
+            pred_h = pred_bboxes[:, 3]
+            mean_area = (pred_w * pred_h).mean().item()
+            if mean_area < 1e-6:
+                print(f"\n[⚠️ 框退化异常] 预测框全面萎缩！平均面积接近0 ({mean_area:.2e})！NWD可能失去目标！")
+            elif mean_area > 0.8:
+                print(f"\n[⚠️ 框退化异常] 预测框全面膨胀！平均面积覆盖全图 ({mean_area:.2f})！回归层摆烂！")
+        # 🚨🚨 ====================== 🚨🚨
         bs, nq, nc = pred_scores.shape
 
         if sum(gt_groups) == 0:

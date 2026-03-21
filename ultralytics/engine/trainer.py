@@ -722,6 +722,20 @@ class BaseTrainer:
         """Perform a single step of the training optimizer with gradient clipping and EMA update."""
         self.scaler.unscale_(self.optimizer)  # unscale gradients
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
+
+        # 🚨🚨 【深水探针一：梯度心跳】 🚨🚨
+        if self.epoch <= 5 and torch.rand(1).item() < 0.05:  # 前5轮，5%的概率抽查
+            grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+            if len(grad_norms) > 0:
+                avg_grad = sum(grad_norms) / len(grad_norms)
+                max_grad = max(grad_norms)
+                # 只有当梯度极其诡异时才报警
+                if avg_grad < 1e-6:
+                    print(f"\n[⚠️ 心跳异常] Epoch {self.epoch}: 平均梯度极其微弱 ({avg_grad:.2e})！网络陷入停滞！")
+                elif max_grad > 1000.0:
+                    print(f"\n[⚠️ 心跳异常] Epoch {self.epoch}: 最大梯度极高 ({max_grad:.2f})！网络即将梯度爆炸！")
+        # 🚨🚨 ====================== 🚨🚨
+
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad()
